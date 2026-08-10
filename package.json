@@ -6,12 +6,13 @@
   "description": "CashCompass — personal income & spending navigator",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/precache.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --noEmit",
-    "build:standalone": "npm run build && node scripts/standalone.mjs"
+    "build:standalone": "npm run build && node scripts/standalone.mjs",
+    "icons": "node scripts/icons.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

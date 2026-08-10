@@ -1,0 +1,65 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+      - claude/cashcompass-finance-app-qxy4ae
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it — a half-published site
+# is worse than a slightly stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Gate the deploy on the engine tests. The balance maths is the product;
+      # shipping it broken to a phone someone budgets on is the failure mode
+      # worth spending 30 seconds of CI on.
+      - run: npm test
+
+      - run: npm run build
+        env:
+          # Pages serves this repo from /Financial-assistant-/, not the root.
+          VITE_BASE: /${{ github.event.repository.name }}/
+
+      # Single-page app: Pages has no rewrite rules, so a deep link or a reload
+      # on any path would 404. Serving the same document as 404.html makes the
+      # client-side app handle those instead.
+      - run: cp dist/index.html dist/404.html
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

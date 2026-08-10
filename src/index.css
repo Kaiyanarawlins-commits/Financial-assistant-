@@ -842,6 +842,44 @@ p { margin: 0; }
   border: 0;
 }
 
+/*
+ * Touch targets.
+ *
+ * The compact controls are sized for a cursor. On a finger they land around
+ * 31–33px, under the ~44px both platforms' guidelines call for, which turns
+ * "edit this expense" into a game of precision — exactly the entry friction the
+ * app is built to remove. Scoped to coarse pointers so the denser desktop
+ * layout is untouched.
+ */
+@media (pointer: coarse) {
+  .btn--sm {
+    min-height: 40px;
+    padding: 9px 14px;
+  }
+
+  .btn--icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .seg__btn {
+    min-height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .chip {
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .legend__item {
+    min-height: 34px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
