@@ -31,6 +31,31 @@ Roughly 264 kB, no external requests. Where `localStorage` is unavailable — a 
 persistence degrades to in-memory for the session rather than failing; the app still runs, it just reopens with demo
 data.
 
+### On your phone
+
+Deployed by `.github/workflows/deploy.yml` on every push, gated on `npm test`, to
+**https://kaiyanarawlins-commits.github.io/Financial-assistant-/**
+
+**One-time setup:** in the repo, **Settings → Pages → Source: "GitHub Actions"**. Creating a Pages site for the
+first time needs a permission the workflow's `GITHUB_TOKEN` does not carry, so this single switch cannot be
+automated. Once it is set, every push deploys on its own.
+
+It installs as a PWA — **iOS**: Share → *Add to Home Screen*; **Android**: menu → *Install app*. It then launches
+without browser chrome, keeps its own icon, and works offline.
+
+Two details that make the offline claim real:
+
+- The service worker precaches the actual build output, injected by `scripts/precache.mjs` after each build. This is
+  load-bearing rather than an optimisation: the first page load happens *before* the worker controls the page, so its
+  JS and CSS never reach the fetch handler. Caching only the HTML yields a shell that boots offline and then cannot
+  find its own bundle — an app that looks installed and is broken.
+- `VITE_BASE` sets the base path, because Pages serves this repo from a subpath where a root-relative bundle would
+  404 on every asset.
+
+Tap targets are enlarged under `(pointer: coarse)`. The compact controls measured 31–33px on a phone, below the ~44px
+guideline, which turns editing an entry into a game of precision — the exact friction the app exists to remove.
+Desktop density is unchanged.
+
 ---
 
 ## The two headline numbers

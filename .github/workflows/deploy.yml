@@ -46,9 +46,13 @@ jobs:
       # client-side app handle those instead.
       - run: cp dist/index.html dist/404.html
 
+      # One-time setup, done by hand: Settings → Pages → Source: "GitHub Actions".
+      #
+      # `enablement: true` is deliberately not set. Creating a Pages site for the
+      # first time needs a permission the workflow's GITHUB_TOKEN does not carry
+      # ("Resource not accessible by integration"), so asking for it here only
+      # turns a missing setting into a confusing build failure.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
