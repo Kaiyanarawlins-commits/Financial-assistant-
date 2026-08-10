@@ -7,13 +7,29 @@ The name is the thesis: a compass gives direction, and this app's job is to show
 
 ```bash
 npm install
-npm run dev      # http://localhost:5173
-npm test         # 80 tests over the calculation engine
-npm run build    # typecheck + production bundle
+npm run dev               # http://localhost:5173
+npm test                  # 80 tests over the calculation engine
+npm run build             # typecheck + production bundle
+npm run build:standalone  # everything inlined into one portable HTML file
 ```
 
 No backend, no accounts, no network calls. Everything lives in `localStorage`, and the first run seeds demo data so
 the dashboard has something to show.
+
+### Single-file build
+
+Because the app makes no network requests, `npm run build:standalone` can inline the JS and CSS into one
+self-contained file that runs from a `file://` URL, an email attachment, or any host with a strict content-security
+policy:
+
+```
+dist/cashcompass.html           complete document, double-clickable
+dist/cashcompass.fragment.html  body content only, for hosts supplying their own skeleton
+```
+
+Roughly 264 kB, no external requests. Where `localStorage` is unavailable — a sandboxed iframe, private browsing —
+persistence degrades to in-memory for the session rather than failing; the app still runs, it just reopens with demo
+data.
 
 ---
 
