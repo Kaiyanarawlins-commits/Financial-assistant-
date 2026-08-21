@@ -155,7 +155,31 @@ const ESSENTIAL_CATEGORIES = new Set([
   'debt',
 ]);
 
+/**
+ * Memoised by state identity.
+ *
+ * The store replaces the state object on every change, so identity is exactly
+ * the right cache key: a stale entry is unreachable the moment anything is
+ * edited. A WeakMap means the cache cannot keep old states alive.
+ */
+const factsCache = new WeakMap<AppState, Map<string, AdvisorFacts>>();
+
 export function buildFacts(state: AppState, reference: ISODate, period?: Period): AdvisorFacts {
+  const key = period ? `${period.start}:${period.end}:${reference}` : reference;
+  let perState = factsCache.get(state);
+  if (!perState) {
+    perState = new Map();
+    factsCache.set(state, perState);
+  }
+  const cached = perState.get(key);
+  if (cached) return cached;
+
+  const computed = computeFacts(state, reference, period);
+  perState.set(key, computed);
+  return computed;
+}
+
+function computeFacts(state: AppState, reference: ISODate, period?: Period): AdvisorFacts {
   const activePeriod = period ?? monthPeriod(cycleKeyOf(reference));
   const snapshot = computeSnapshot(state, activePeriod, reference);
   const history = trend(state, reference, 7);
@@ -429,7 +453,7 @@ export function formatFactSheet(facts: AdvisorFacts): string {
   if (facts.categories.length > 0) {
     lines.push('');
     lines.push('CATEGORIES (this period)');
-    for (const cat of facts.categories.slice(0, 10)) {
+    for (const cat of facts.categories.slice(0, 8)) {
       const bits = [`${m(cat.spentCents)}`, `${p(cat.percentOfSpend)} of spend`];
       if (cat.capCents) bits.push(`${p(cat.capPercent ?? 0, 0)} of ${m(cat.capCents)} cap`);
       if (cat.deltaVsLastMonthCents !== 0) {
@@ -503,7 +527,7 @@ export function formatFactSheet(facts: AdvisorFacts): string {
 
   lines.push('');
   lines.push('MONTHLY HISTORY (oldest first)');
-  for (const h of facts.history) {
+  for (const h of facts.history.slice(-6)) {
     lines.push(`- ${h.label}: income ${m(h.incomeCents)}, spent ${m(h.spentCents)}, net ${m(h.netCents)}`);
   }
 

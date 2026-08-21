@@ -8,7 +8,7 @@ The name is the thesis: a compass gives direction, and this app's job is to show
 ```bash
 npm install
 npm run dev               # http://localhost:5173
-npm test                  # 148 tests over the engine, agents and guardrails
+npm test                  # 176 tests over the engine, agents and guardrails
 npm run build             # typecheck + production bundle
 npm run build:standalone  # everything inlined into one portable HTML file
 ```
@@ -128,6 +128,7 @@ src/
     seed.ts             Demo data, generated relative to today
     exporter.ts         CSV export for tax prep
     advisorConfig.ts    Advisor backend settings (API key kept out of AppState)
+    chatHistory.ts      Saved conversations, persisted separately from AppState
     agents/
       facts.ts          Precomputed figures every specialist answers from
       roster.ts         The seven specialists: prompts, tools, local answers
@@ -135,6 +136,9 @@ src/
       calculators.ts    Financial maths for hypotheticals
       tools.ts          Tool schemas + local execution
       guardrails.ts     Pre-flight, prompt and post-flight enforcement
+      verify.ts         Checks every generated figure against source data
+      conversation.ts   Multi-turn memory, reference resolution
+      glossary.ts       Stateful terminology — defined once, then used bare
       matching.ts       Word-boundary keyword matching
       claude.ts         Claude-backed path (Fable 5) with the tool loop
   state/store.tsx       Reducer + context
@@ -228,6 +232,49 @@ tool call is surfaced in the UI as it runs ("Ran your debt payoff numbers"), whi
 feel like it is working rather than improvising; and the iteration count needs a hard ceiling, because a runaway
 loop on a consumer app spends the user's money.
 
+### Numeric verification
+
+Every monetary and percentage figure in a generated answer is checked against the values the model was actually
+given — the fact sheet plus every tool result from that turn — **before the user sees it**. A wrong number delivered
+confidently is the worst failure this app can have, and a prompt rule is not a control.
+
+The check is one-directional by design: it can prove a figure came from source data, and it cannot prove one did
+not. So an unverified figure is treated as *unconfirmed*, not as a lie:
+
+1. The answer goes back to the model with the offending figures named, and it is asked to restate using only source
+   values or to say plainly that it does not have the number.
+2. If a figure survives that round, the answer is shown with a visible caution naming it, and the reply is badged
+   **unverified figures** in the UI.
+
+Suppressing a correct number would be its own kind of wrong, so nothing is silently deleted. Annualising a monthly
+source figure is recognised as the model's own arithmetic rather than an invention, and standard guideline
+percentages (20% savings, 28/36, the 4% rule) are allowed through.
+
+### Conversation memory
+
+Threads are multi-turn. `lib/agents/conversation.ts` tracks the entities under discussion, the terms already
+defined, and the last recommendation, then expands a follow-up into a self-contained question before routing — so
+"why?" and "what about the Visa?" resolve instead of starting over. Routing is sticky across a follow-up: a bare
+"why?" carries no signal of its own, and re-routing it hands the thread to whoever matches a stray word.
+
+Terminology is stateful. A term is defined the first time it appears and used bare afterwards, which is how a
+professional actually talks — re-explaining "utilization" every turn is as wrong as never explaining it.
+
+**Saved conversations** persist to `localStorage` and reopen with their memory intact, listed newest first and
+grouped by day. Reopening a thread and finding the advisor had forgotten the account you spent ten turns on would
+be worse than not saving it, so the memory is stored alongside the transcript.
+
+### Speed
+
+- **Streaming.** Answers render token-by-token via `client.beta.messages.stream`, with a caret while text arrives.
+- **Timeout.** A hard 45-second deadline. Past that the local specialist answers instead — it has a correct answer
+  available immediately, and a spinner that never resolves is worse than a less nuanced reply.
+- **Caching.** `buildFacts` is memoised in a `WeakMap` keyed on state identity. The store replaces the state object
+  on every edit, so a stale entry is unreachable the moment anything changes and the cache cannot pin dead states.
+- **Trimmed context.** The fact sheet caps categories and history rather than sending everything.
+- **Fallback everywhere.** A failed, refused, slow, or empty model response falls back to the offline specialist,
+  and the reply is badged so the user knows which answered.
+
 ### Guardrails
 
 Enforced in three places, because "the prompt says not to" is not a control:
@@ -309,15 +356,16 @@ The last two are honest gaps rather than oversights: both require infrastructure
 
 ## Testing
 
-148 tests, all against the pure modules:
+176 tests, all against the pure modules:
 
 ```
 finance.test.ts   45  balance maths, recurring expansion, idempotency, month-length
                       clamping, leap years, safe-to-spend, buffer mode, cash-on-hand
                       anchoring, income schedules, irregular income, categories,
                       trends, reminders
-agents.test.ts    68  facts, routing, calculators, figure parsing, guardrails,
-                      tool execution, specialist answers, hypotheticals
+agents.test.ts    96  facts, routing, calculators, figure parsing, guardrails,
+                      tool execution, specialist answers, hypotheticals,
+                      conversation memory, numeric verification, chat history
 advisor.test.ts   26  redaction, guardrails, topic matching, insights
 debt.test.ts       9  payoff simulation, strategy comparison, unpayable plans
 ```

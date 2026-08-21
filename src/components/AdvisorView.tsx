@@ -16,10 +16,21 @@ import {
   type ToolCallRecord,
 } from '../lib/agents';
 import { loadAdvisorConfig, toClaudeConfig } from '../lib/advisorConfig';
+import {
+  deleteConversation,
+  listConversations,
+  loadConversation,
+  newConversation,
+  relativeDay,
+  saveConversation,
+  titleFrom,
+  type Conversation,
+  type ConversationSummary,
+} from '../lib/chatHistory';
 import { cycleKeyOf, monthPeriod, shiftCycle } from '../lib/dates';
 import { computeSnapshot } from '../lib/finance';
 import { formatMoney, formatSigned } from '../lib/money';
-import { AlertIcon, Card, CheckIcon, InfoIcon, RichText, Segmented } from './ui';
+import { AlertIcon, Card, CheckIcon, EmptyState, InfoIcon, RichText, Segmented } from './ui';
 
 interface Message {
   id: number;
@@ -30,6 +41,8 @@ interface Message {
   refused?: boolean;
   fellBack?: boolean;
   error?: string;
+  /** A figure in this answer could not be matched to the user's data. */
+  unverified?: boolean;
   /** Set when this answer continued the thread rather than starting fresh. */
   followUpOf?: string;
 }
@@ -44,7 +57,9 @@ interface Message {
  */
 export function AdvisorView({ reference }: { reference: string }) {
   const { state } = useStore();
-  const [tab, setTab] = useState<'chat' | 'team' | 'insights' | 'recap'>('chat');
+  const [tab, setTab] = useState<'chat' | 'history' | 'team' | 'insights' | 'recap'>('chat');
+  // Held here so History can hand a thread to Chat across a tab switch.
+  const [resume, setResume] = useState<Conversation | null>(null);
 
   return (
     <div className="stack">
@@ -54,12 +69,32 @@ export function AdvisorView({ reference }: { reference: string }) {
         onChange={setTab}
         options={[
           { value: 'chat', label: 'Ask' },
+          { value: 'history', label: 'History' },
           { value: 'team', label: 'Team' },
           { value: 'insights', label: 'Insights' },
           { value: 'recap', label: 'Recap' },
         ]}
       />
-      {tab === 'chat' && <Chat reference={reference} />}
+      {tab === 'chat' && (
+        // Keyed on the resumed thread so opening one from History remounts Chat
+        // with that thread's state. `resume` is deliberately *not* cleared on
+        // mount — doing so changed this key and remounted straight back to an
+        // empty chat, discarding the thread that had just been restored.
+        <Chat
+          key={resume?.id ?? 'live'}
+          reference={reference}
+          resume={resume}
+          onNewChat={() => setResume(null)}
+        />
+      )}
+      {tab === 'history' && (
+        <HistoryPanel
+          onOpen={(conversation: Conversation) => {
+            setResume(conversation);
+            setTab('chat');
+          }}
+        />
+      )}
       {tab === 'team' && <TeamPanel reference={reference} />}
       {tab === 'insights' && <Insights reference={reference} />}
       {tab === 'recap' && <RecapPanel reference={reference} />}
@@ -83,28 +118,58 @@ const SUGGESTIONS = [
   'Am I saving enough?',
 ];
 
+const INTRO_MESSAGE: Message = {
+  id: 0,
+  role: 'bot',
+  text: `I'm a team of seven specialists. Ask a question and whichever one owns it answers, using your real numbers — not a general explanation.
+
+I can also run hypotheticals: salaries you don't earn yet, houses you haven't bought, investments you haven't made. Give me the figures and I'll do the arithmetic.
+
+Every figure I give you is checked against your recorded data before you see it. I can see amounts and categories only — never account numbers or logins, and I won't ask for them.`,
+};
+
 /** Offered once a thread exists — each only makes sense in context. */
 const FOLLOW_UPS = ['Why?', 'How much would that save?', 'Is that good?', 'What should I do first?'];
 
-function Chat({ reference }: { reference: string }) {
+function Chat({
+  reference,
+  resume,
+  onNewChat,
+}: {
+  reference: string;
+  resume: Conversation | null;
+  /** Lets the parent drop the resumed thread so the key returns to "live". */
+  onNewChat: () => void;
+}) {
   const { state } = useStore();
   const config = useMemo(() => loadAdvisorConfig(), []);
   const claudeConfig = useMemo(() => toClaudeConfig(config), [config]);
   const modelBacked = isConfigured(claudeConfig);
 
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 0,
-      role: 'bot',
-      text: `I'm a team of seven specialists. Ask a question and whichever one owns it answers, using your real numbers — not a general explanation.\n\nI can also run hypotheticals: salaries you don't earn yet, houses you haven't bought, investments you haven't made. Give me the figures and I'll do the arithmetic.\n\nI can see amounts and categories only — never account numbers or logins, and I won't ask for them.`,
-    },
-  ]);
+  const [conversation, setConversation] = useState<Conversation>(() => resume ?? newConversation());
+  const [messages, setMessages] = useState<Message[]>(() =>
+    resume && resume.messages.length > 0
+      ? resume.messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          text: m.text,
+          agent: m.agentId ? AGENT_LIST.find((a) => a.id === m.agentId) : undefined,
+          refused: m.refused,
+          fellBack: m.fellBack,
+          unverified: m.unverified,
+          followUpOf: m.followUpOf,
+        }))
+      : [INTRO_MESSAGE],
+  );
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [liveTools, setLiveTools] = useState<ToolCallRecord[]>([]);
   const [pendingAgent, setPendingAgent] = useState<Agent | null>(null);
   // Carried across turns so "why?" and "what about the Visa?" resolve.
-  const [memory, setMemory] = useState<ConversationMemory>(() => emptyMemory());
+  const [memory, setMemory] = useState<ConversationMemory>(() => resume?.memory ?? emptyMemory());
+  // Text arriving from the model before the turn completes.
+  const [streamed, setStreamed] = useState('');
+  const [status, setStatus] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController>();
 
@@ -126,6 +191,8 @@ function Chat({ reference }: { reference: string }) {
     setDraft('');
     setBusy(true);
     setLiveTools([]);
+    setStreamed('');
+    setStatus(null);
     setPendingAgent(routed.agent);
     setMessages((current) => [...current, { id: current.length, role: 'user', text: safe }]);
 
@@ -149,24 +216,60 @@ function Chat({ reference }: { reference: string }) {
         history,
         memory,
         onToolCall: (call) => setLiveTools((current) => [...current, call]),
+        onText: (chunk) => setStreamed((current) => current + chunk),
+        // A correction round replaces the answer, so the partial text on screen
+        // is no longer what will be delivered — clear it rather than let two
+        // drafts run together.
+        onStatus: (message) => {
+          setStatus(message);
+          setStreamed('');
+        },
         signal: controller.signal,
       });
 
       setMemory(reply.memory);
-      setMessages((current) => [
-        ...current,
-        {
-          id: current.length,
-          role: 'bot',
-          text: reply.text,
-          agent: reply.agent,
-          toolCalls: reply.toolCalls,
-          refused: reply.refused,
-          fellBack: reply.fellBackToLocal,
-          error: reply.error,
-          followUpOf: resolution.isFollowUp ? (resolution.subject?.name ?? 'the previous answer') : undefined,
-        },
-      ]);
+      setMessages((current) => {
+        const next: Message[] = [
+          ...current,
+          {
+            id: current.length,
+            role: 'bot',
+            text: reply.text,
+            agent: reply.agent,
+            toolCalls: reply.toolCalls,
+            refused: reply.refused,
+            fellBack: reply.fellBackToLocal,
+            unverified: reply.unverifiedFigures,
+            error: reply.error,
+            followUpOf: resolution.isFollowUp
+              ? (resolution.subject?.name ?? 'the previous answer')
+              : undefined,
+          },
+        ];
+
+        // Persist after every exchange, so a thread survives a closed tab.
+        const updated: Conversation = {
+          ...conversation,
+          title: conversation.messages.length === 0 ? titleFrom(safe) : conversation.title,
+          updatedAt: new Date().toISOString(),
+          memory: reply.memory,
+          messages: next.map((m) => ({
+            id: m.id,
+            role: m.role,
+            text: m.text,
+            agentId: m.agent?.id,
+            agentName: m.agent?.name,
+            agentColor: m.agent?.color,
+            refused: m.refused,
+            fellBack: m.fellBack,
+            unverified: m.unverified,
+            followUpOf: m.followUpOf,
+          })),
+        };
+        setConversation(updated);
+        saveConversation(updated);
+        return next;
+      });
     } finally {
       setBusy(false);
       setLiveTools([]);
@@ -176,6 +279,25 @@ function Chat({ reference }: { reference: string }) {
 
   return (
     <>
+      <div className="row row--between" style={{ marginBottom: 2 }}>
+        <span className="tiny faint truncate">{conversation.title}</span>
+        {messages.length > 1 && (
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={() => {
+              const fresh = newConversation();
+              setConversation(fresh);
+              setMemory(emptyMemory());
+              setMessages([INTRO_MESSAGE]);
+              onNewChat();
+            }}
+          >
+            New chat
+          </button>
+        )}
+      </div>
+
       {!modelBacked && (
         <div className="alert" style={{ marginBottom: 4 }}>
           <span className="alert__icon"><InfoIcon /></span>
@@ -202,6 +324,7 @@ function Chat({ reference }: { reference: string }) {
                     <span className="pill">continuing · {message.followUpOf}</span>
                   )}
                   {message.fellBack && <span className="pill pill--warn">offline answer</span>}
+                  {message.unverified && <span className="pill pill--danger">unverified figures</span>}
                 </div>
               )}
               {message.toolCalls && message.toolCalls.length > 0 && (
@@ -224,12 +347,27 @@ function Chat({ reference }: { reference: string }) {
               </div>
             )}
             {liveTools.length > 0 && <ToolTrace calls={liveTools} live />}
-            <div className="msg msg--bot msg--thinking" aria-live="polite">
-              <span className="typing" aria-hidden="true">
-                <i /><i /><i />
-              </span>
-              <span className="sr-only">Working on your answer</span>
-            </div>
+            {status && (
+              <div className="trace">
+                <div className="trace__item trace__item--live">
+                  <AlertIcon size={12} />
+                  <span>Re-checking the figures against your data</span>
+                </div>
+              </div>
+            )}
+            {streamed ? (
+              <div className="msg msg--bot" aria-live="polite">
+                <RichText text={streamed} />
+                <span className="caret" aria-hidden="true" />
+              </div>
+            ) : (
+              <div className="msg msg--bot msg--thinking" aria-live="polite">
+                <span className="typing" aria-hidden="true">
+                  <i /><i /><i />
+                </span>
+                <span className="sr-only">Working on your answer</span>
+              </div>
+            )}
           </div>
         )}
 
@@ -474,6 +612,78 @@ function RecapPanel({ reference }: { reference: string }) {
           <RichText text={recap.tip} />
         </div>
       </Card>
+    </div>
+  );
+}
+
+/** Saved threads, newest first, grouped by day. */
+function HistoryPanel({ onOpen }: { onOpen: (conversation: Conversation) => void }) {
+  const [summaries, setSummaries] = useState<ConversationSummary[]>(() => listConversations());
+
+  if (summaries.length === 0) {
+    return (
+      <Card>
+        <EmptyState title="No saved conversations yet">
+          Threads are saved as you go and reopen with their context intact — the advisor will still know which account
+          you were discussing.
+        </EmptyState>
+      </Card>
+    );
+  }
+
+  const groups = new Map<string, ConversationSummary[]>();
+  for (const summary of summaries) {
+    const day = relativeDay(summary.updatedAt);
+    groups.set(day, [...(groups.get(day) ?? []), summary]);
+  }
+
+  return (
+    <div className="stack" style={{ gap: 12 }}>
+      {[...groups.entries()].map(([day, items]) => (
+        <div key={day}>
+          <div className="card__title">{day}</div>
+          <Card flush>
+            {items.map((summary) => (
+              <div key={summary.id} className="ledger" style={{ cursor: 'default' }}>
+                <button
+                  type="button"
+                  className="grow"
+                  style={{ background: 'none', border: 0, textAlign: 'left', padding: 0 }}
+                  onClick={() => {
+                    const full = loadConversation(summary.id);
+                    if (full) onOpen(full);
+                  }}
+                >
+                  <span className="ledger__name truncate">{summary.title}</span>
+                  <span className="ledger__meta">
+                    {summary.agentName && (
+                      <>
+                        <span className="dot" style={{ background: summary.agentColor }} aria-hidden="true" />
+                        <span>{summary.agentName}</span>
+                        <span>·</span>
+                      </>
+                    )}
+                    <span>
+                      {summary.messageCount} {summary.messageCount === 1 ? 'message' : 'messages'}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  aria-label={`Delete conversation: ${summary.title}`}
+                  onClick={() => {
+                    deleteConversation(summary.id);
+                    setSummaries(listConversations());
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </Card>
+        </div>
+      ))}
     </div>
   );
 }

@@ -28,6 +28,9 @@ import {
   withDefinition,
 } from './conversation';
 import { termsIn } from './glossary';
+import { cautionFor, correctionPrompt, extractFigures, verifyAnswer } from './verify';
+import { formatMoney } from '../money';
+import { newConversation, titleFrom } from '../chatHistory';
 
 const REFERENCE = '2026-08-15';
 
@@ -611,5 +614,121 @@ describe('accountant register', () => {
     expect(termsIn('your debt-to-income ratio is high')).toContain('dti');
     expect(termsIn('the avalanche method pays less interest')).toContain('avalanche');
     expect(termsIn('nothing relevant here')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('numeric verification', () => {
+  const state = demo();
+  const facts = buildFacts(state, REFERENCE);
+
+  it('extracts money and percentage figures', () => {
+    const figures = extractFigures('You owe $3,400.00 at 24.99% and $920 more.');
+    expect(figures.filter((f) => f.kind === 'money').map((f) => f.value)).toEqual([340_000, 92_000]);
+    expect(figures.filter((f) => f.kind === 'percent').map((f) => f.value)).toEqual([24.99]);
+  });
+
+  it('verifies figures that came from the fact sheet', () => {
+    const report = verifyAnswer(
+      `Your debt is ${formatMoney(facts.debt.totalCents)} and your fixed costs are ${formatMoney(facts.cashflow.recurringCents)}.`,
+      facts,
+      [],
+    );
+    expect(report.ok).toBe(true);
+    expect(report.unverified).toHaveLength(0);
+  });
+
+  it('flags a figure that appears nowhere in the source data', () => {
+    const report = verifyAnswer('Your mortgage balance is $412,900.55.', facts, []);
+    expect(report.ok).toBe(false);
+    expect(report.unverified.map((f) => f.raw)).toContain('$412,900.55');
+  });
+
+  it('accepts a figure the model annualised from a monthly source', () => {
+    const monthly = facts.debt.monthlyInterestCents;
+    const report = verifyAnswer(`That is ${formatMoney(monthly * 12)} a year.`, facts, []);
+    expect(report.ok).toBe(true);
+  });
+
+  it('accepts figures returned by a tool this turn', () => {
+    const toolResult = executeTool(
+      'calculate',
+      { operation: 'compound_growth', monthly_dollars: 400, annual_rate_percent: 7, years: 25 },
+      state,
+      REFERENCE,
+    ) as { future_value_dollars: number };
+
+    const withTool = verifyAnswer(
+      `You would have ${formatMoney(Math.round(toolResult.future_value_dollars * 100))}.`,
+      facts,
+      [toolResult],
+    );
+    expect(withTool.ok).toBe(true);
+
+    // The same claim without the tool result is exactly the hallucination case.
+    const withoutTool = verifyAnswer(
+      `You would have ${formatMoney(Math.round(toolResult.future_value_dollars * 100))}.`,
+      facts,
+      [],
+    );
+    expect(withoutTool.ok).toBe(false);
+  });
+
+  it('does not flag standard guideline percentages', () => {
+    const report = verifyAnswer('The guideline is 20% saving, 50% needs, 30% wants.', facts, []);
+    expect(report.ok).toBe(true);
+  });
+
+  it('builds a correction prompt naming the bad figures', () => {
+    const report = verifyAnswer('Your balance is $99,999.99.', facts, []);
+    const prompt = correctionPrompt(report);
+    expect(prompt).toContain('$99,999.99');
+    expect(prompt).toMatch(/do not have/i);
+  });
+
+  it('cautions rather than deleting when a figure survives correction', () => {
+    const report = verifyAnswer('Your balance is $99,999.99.', facts, []);
+    expect(cautionFor(report)).toMatch(/estimate/i);
+    expect(cautionFor(report)).toContain('$99,999.99');
+  });
+
+  it('passes an answer with no figures at all', () => {
+    expect(verifyAnswer('Pay the minimums on autopay first.', facts, []).ok).toBe(true);
+  });
+});
+
+describe('facts caching', () => {
+  it('returns the same object for the same state and date', () => {
+    const state = demo();
+    expect(buildFacts(state, REFERENCE)).toBe(buildFacts(state, REFERENCE));
+  });
+
+  it('recomputes when the state object changes', () => {
+    const state = demo();
+    const first = buildFacts(state, REFERENCE);
+    const edited = { ...state, goals: [] };
+    expect(buildFacts(edited, REFERENCE)).not.toBe(first);
+  });
+});
+
+describe('chat history', () => {
+  it('titles a thread from the first question', () => {
+    expect(titleFrom('How do I raise my credit score?')).toBe('How do I raise my credit score');
+    expect(titleFrom('  spaced   out  ')).toBe('spaced out');
+    const long = titleFrom('a'.repeat(80));
+    expect(long.length).toBeLessThanOrEqual(53);
+    expect(long.endsWith('…')).toBe(true);
+  });
+
+  it('falls back to a placeholder for an empty question', () => {
+    expect(titleFrom('   ')).toBe('New conversation');
+  });
+
+  it('starts a conversation with empty memory', () => {
+    const conversation = newConversation();
+    expect(conversation.messages).toHaveLength(0);
+    expect(conversation.memory.turns).toHaveLength(0);
+    expect(conversation.title).toBe('New conversation');
   });
 });

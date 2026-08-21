@@ -51,6 +51,10 @@ export interface AskParams {
   /** Carried between turns so follow-ups resolve. Omit for a fresh thread. */
   memory?: ConversationMemory;
   onToolCall?: (call: ToolCallRecord) => void;
+  /** Text chunks as they stream in, for progressive rendering. */
+  onText?: (chunk: string) => void;
+  /** Progress notes, e.g. when an answer is being re-checked. */
+  onStatus?: (status: string) => void;
   signal?: AbortSignal;
 }
 
@@ -75,6 +79,8 @@ export async function ask(params: AskParams): Promise<AskResult> {
     history = [],
     memory = emptyMemory(),
     onToolCall,
+    onText,
+    onStatus,
     signal,
   } = params;
 
@@ -103,6 +109,8 @@ export async function ask(params: AskParams): Promise<AskResult> {
         hypothetical: routed.hypothetical,
         conversationState: formatMemory(afterQuestion),
         onToolCall,
+        onText,
+        onStatus,
         signal,
       })
     : {

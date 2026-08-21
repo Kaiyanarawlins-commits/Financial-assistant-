@@ -5,6 +5,13 @@ import { screenAnswer, screenQuestion } from './guardrails';
 import { buildSystemPrompt, type Agent } from './roster';
 import { executeTool, toolsFor } from './tools';
 import { formatFactSheet, type AdvisorFacts } from './facts';
+import {
+  cautionFor,
+  correctionPrompt,
+  describeVerification,
+  verifyAnswer,
+  type VerificationReport,
+} from './verify';
 
 /**
  * The model-backed advisor.
@@ -42,10 +49,21 @@ export interface AgentReply {
   /** Set when the model path failed and the local specialist answered instead. */
   fellBackToLocal?: boolean;
   error?: string;
+  /** What the numeric check found, for display and for the tool trace. */
+  verification?: VerificationReport;
+  /** True when a figure survived the correction round unmatched. */
+  unverifiedFigures?: boolean;
 }
 
 /** Cap on tool round trips. Every specialist's job fits well inside this. */
 const MAX_ITERATIONS = 6;
+
+/**
+ * Hard ceiling on one question. Past this the answer is not worth waiting for:
+ * the local specialist has a correct answer available immediately, and a spinner
+ * that never resolves is worse than a slightly less nuanced reply.
+ */
+const REQUEST_TIMEOUT_MS = 45_000;
 
 /**
  * Thinking is always on for Fable 5, so the parameter is omitted entirely —
@@ -85,6 +103,10 @@ export interface AskOptions {
   conversationState?: string;
   /** Called as each tool runs, so the UI can show the work in progress. */
   onToolCall?: (call: ToolCallRecord) => void;
+  /** Called with each text chunk as it arrives, for token-by-token rendering. */
+  onText?: (chunk: string) => void;
+  /** Called when the answer is being re-checked, so the UI can say so. */
+  onStatus?: (status: string) => void;
   signal?: AbortSignal;
 }
 
@@ -99,6 +121,8 @@ export async function askClaude(question: string, options: AskOptions): Promise<
     hypothetical,
     conversationState = '',
     onToolCall,
+    onText,
+    onStatus,
     signal,
   } = options;
 
@@ -128,10 +152,19 @@ export async function askClaude(question: string, options: AskOptions): Promise<
   ];
 
   const toolCalls: ToolCallRecord[] = [];
+  /** Everything the tools returned, so the verifier knows what was legitimately available. */
+  const toolResults: unknown[] = [];
 
-  try {
+  // A slow call must not strand the user: the local specialist has a correct
+  // answer ready immediately, so the request gets a hard deadline.
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), REQUEST_TIMEOUT_MS);
+  const abortSignal = combineSignals(signal, deadline.signal);
+
+  /** One request/tool cycle, streaming text as it arrives. Returns the final text. */
+  const runLoop = async (): Promise<string | null> => {
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-      const response = await client.beta.messages.create(
+      const stream = client.beta.messages.stream(
         {
           model: config.model,
           max_tokens: 8000,
@@ -141,50 +174,30 @@ export async function askClaude(question: string, options: AskOptions): Promise<
           output_config: { effort: config.effort },
           // Fable 5 and Opus 5 can decline on policy grounds. Server-side
           // fallbacks re-run the same request on a capable alternative inside
-          // the same call, so a refusal on a benign finance question does not
-          // surface to the user as a dead end.
+          // the same call, so a refusal on a benign finance question is not a
+          // dead end for the user.
           betas: ['server-side-fallback-2026-07-01'],
           fallbacks: 'default',
           ...(isFableFamily(config.model) ? {} : { thinking: { type: 'adaptive' as const } }),
         },
-        { signal },
+        { signal: abortSignal },
       );
 
-      if (response.stop_reason === 'refusal') {
-        return {
-          text: `I could not answer that one. If it was a question about budgeting, debt, credit, saving or how investing accounts work, try rephrasing it — those are all in scope.`,
-          agent,
-          toolCalls,
-          refused: true,
-        };
-      }
+      if (onText) stream.on('text', onText);
+      const response = await stream.finalMessage();
+
+      if (response.stop_reason === 'refusal') return null;
 
       const toolUses = response.content.filter(
         (block): block is Anthropic.Beta.BetaToolUseBlock => block.type === 'tool_use',
       );
 
       if (toolUses.length === 0 || response.stop_reason !== 'tool_use') {
-        const text = response.content
+        return response.content
           .filter((block): block is Anthropic.Beta.BetaTextBlock => block.type === 'text')
           .map((block) => block.text)
           .join('\n')
           .trim();
-
-        if (!text) {
-          return {
-            text: agent.localAnswer(facts, state, clean),
-            agent,
-            toolCalls,
-            fellBackToLocal: true,
-          };
-        }
-
-        // Last line of defence: the prompt forbids recommendations and
-        // guarantees, but "usually complies" is not the bar for a finance app.
-        const violation = screenAnswer(text);
-        if (violation) return { text: violation.text, agent, toolCalls, refused: true };
-
-        return { text, agent, toolCalls };
       }
 
       messages.push({ role: 'assistant', content: response.content });
@@ -197,11 +210,9 @@ export async function askClaude(question: string, options: AskOptions): Promise<
         toolCalls.push(record);
         onToolCall?.(record);
         try {
-          return {
-            type: 'tool_result',
-            tool_use_id: use.id,
-            content: JSON.stringify(executeTool(use.name, input, state, reference)),
-          };
+          const output = executeTool(use.name, input, state, reference);
+          toolResults.push(output);
+          return { type: 'tool_result', tool_use_id: use.id, content: JSON.stringify(output) };
         } catch (error) {
           return {
             type: 'tool_result',
@@ -214,18 +225,76 @@ export async function askClaude(question: string, options: AskOptions): Promise<
 
       messages.push({ role: 'user', content: results });
     }
+    return null;
+  };
 
-    // Ran out of iterations without a final answer.
-    return { text: agent.localAnswer(facts, state, clean), agent, toolCalls, fellBackToLocal: true };
+  try {
+    let answer = await runLoop();
+    if (!answer) {
+      return { text: agent.localAnswer(facts, state, clean), agent, toolCalls, fellBackToLocal: true };
+    }
+
+    // Every figure is checked against what the model was actually given. A
+    // wrong number delivered confidently is the worst failure this app has, and
+    // "the prompt said not to" is not a control.
+    let report = verifyAnswer(answer, facts, toolResults);
+
+    if (!report.ok) {
+      onStatus?.(describeVerification(report));
+      messages.push({ role: 'assistant', content: answer });
+      messages.push({ role: 'user', content: correctionPrompt(report) });
+
+      const corrected = await runLoop();
+      if (corrected) {
+        answer = corrected;
+        report = verifyAnswer(answer, facts, toolResults);
+      }
+    }
+
+    const violation = screenAnswer(answer);
+    if (violation) return { text: violation.text, agent, toolCalls, refused: true };
+
+    return {
+      text: report.ok ? answer : `${cautionFor(report)}${answer}`,
+      agent,
+      toolCalls,
+      verification: report,
+      unverifiedFigures: !report.ok,
+    };
   } catch (error) {
+    const timedOut = deadline.signal.aborted;
     return {
       text: agent.localAnswer(facts, state, clean),
       agent,
       toolCalls,
       fellBackToLocal: true,
-      error: describeError(error),
+      error: timedOut
+        ? 'The AI advisor took too long, so the built-in specialist answered instead.'
+        : describeError(error),
     };
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+/**
+ * Aborts when either signal does.
+ *
+ * `AbortSignal.any` is not available everywhere this runs, and a missing
+ * timeout would be invisible until a request hung — so the fallback wires the
+ * listeners by hand rather than assuming.
+ */
+function combineSignals(a: AbortSignal | undefined, b: AbortSignal): AbortSignal {
+  if (!a) return b;
+  if (typeof AbortSignal !== 'undefined' && 'any' in AbortSignal) {
+    return (AbortSignal as unknown as { any: (signals: AbortSignal[]) => AbortSignal }).any([a, b]);
+  }
+  const controller = new AbortController();
+  const forward = () => controller.abort();
+  if (a.aborted || b.aborted) controller.abort();
+  a.addEventListener('abort', forward, { once: true });
+  b.addEventListener('abort', forward, { once: true });
+  return controller.signal;
 }
 
 /**
