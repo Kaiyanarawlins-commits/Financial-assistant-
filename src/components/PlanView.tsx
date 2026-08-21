@@ -6,6 +6,7 @@ import { cycleKeyOf, monthPeriod, today } from '../lib/dates';
 import { computeSnapshot, netWorthCents } from '../lib/finance';
 import { formatMoney, formatPercent, toCents, toDollars } from '../lib/money';
 import { NetWorthChart } from './charts';
+import { goalColor, useAnimatedPercent } from './motion';
 import { Card, EmptyState, Field, PlusIcon, Segmented, Sheet, Toggle } from './ui';
 
 /** Goals, debt payoff and net worth — the "beyond this month" tab. */
@@ -80,12 +81,10 @@ function GoalsPanel({ reference }: { reference: string }) {
                     {goal.reserveFromSafeToSpend && ' · reserved from safe-to-spend'}
                   </div>
                 </span>
-                <span className="tnum" style={{ fontWeight: 700 }}>{formatPercent(Math.min(100, percent))}</span>
+                <GoalPercent percent={percent} />
               </div>
 
-              <div className="goal__bar">
-                <span className="goal__fill" style={{ width: `${Math.min(100, percent)}%` }} />
-              </div>
+              <GoalBar percent={percent} />
 
               <div className="row row--between row--wrap" style={{ gap: 8 }}>
                 <span className="tiny faint">
@@ -143,6 +142,40 @@ function GoalsPanel({ reference }: { reference: string }) {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * The goal bar fills from empty and travels amber → blue → green as the goal
+ * completes, so progress is legible from the colour before you read the number.
+ * A funded goal pulses once — the only celebratory moment in the app, and it is
+ * the one place that earns it.
+ */
+function GoalBar({ percent }: { percent: number }) {
+  const animated = useAnimatedPercent(Math.min(100, percent));
+  const complete = percent >= 100;
+  return (
+    <div
+      className="goal__bar"
+      role="progressbar"
+      aria-valuenow={Math.round(Math.min(100, percent))}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
+      <span
+        className={`goal__fill${complete ? ' goal__fill--complete' : ''}`}
+        style={{ width: `${animated}%`, background: goalColor(animated) }}
+      />
+    </div>
+  );
+}
+
+function GoalPercent({ percent }: { percent: number }) {
+  const animated = useAnimatedPercent(Math.min(100, percent));
+  return (
+    <span className="tnum" style={{ fontWeight: 700, color: goalColor(animated) }}>
+      {formatPercent(animated)}
+    </span>
   );
 }
 
@@ -422,6 +455,9 @@ function DebtSheet({
   const [balance, setBalance] = useState(initial ? String(toDollars(initial.balanceCents)) : '');
   const [apr, setApr] = useState(initial ? String(initial.aprPercent) : '');
   const [minimum, setMinimum] = useState(initial ? String(toDollars(initial.minimumPaymentCents)) : '');
+  const [creditLimit, setCreditLimit] = useState(
+    initial?.creditLimitCents ? String(toDollars(initial.creditLimitCents)) : '',
+  );
 
   const valid = name.trim().length > 0 && toCents(balance) > 0;
 
@@ -446,6 +482,7 @@ function DebtSheet({
                 balanceCents: toCents(balance),
                 aprPercent: Number(apr) || 0,
                 minimumPaymentCents: toCents(minimum),
+                creditLimitCents: toCents(creditLimit) > 0 ? toCents(creditLimit) : undefined,
               })
             }
           >
@@ -469,6 +506,18 @@ function DebtSheet({
             <input className="input" inputMode="decimal" value={minimum} onChange={(e) => setMinimum(e.target.value)} />
           </Field>
         </div>
+        <Field
+          label="Credit limit"
+          hint="Credit cards only. Lets the Credit Coach compute your real utilization — about 30% of your score, and the fastest thing you can move."
+        >
+          <input
+            className="input"
+            inputMode="decimal"
+            placeholder="Not a revolving account"
+            value={creditLimit}
+            onChange={(e) => setCreditLimit(e.target.value)}
+          />
+        </Field>
       </div>
     </Sheet>
   );

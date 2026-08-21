@@ -120,8 +120,10 @@ export function seedState(reference: ISODate = today()): AppState {
   ];
 
   state.debts = [
-    { id: newId('debt'), name: 'Visa — everyday card', balanceCents: 340_000, aprPercent: 24.99, minimumPaymentCents: 8_500 },
-    { id: newId('debt'), name: 'Store card', balanceCents: 92_000, aprPercent: 29.99, minimumPaymentCents: 3_500 },
+    // Credit limits on the revolving accounts, so the Credit Coach can compute
+    // real utilization rather than explaining the concept in the abstract.
+    { id: newId('debt'), name: 'Visa — everyday card', balanceCents: 340_000, aprPercent: 24.99, minimumPaymentCents: 8_500, creditLimitCents: 500_000 },
+    { id: newId('debt'), name: 'Store card', balanceCents: 92_000, aprPercent: 29.99, minimumPaymentCents: 3_500, creditLimitCents: 120_000 },
     { id: newId('debt'), name: 'Student loan', balanceCents: 1_840_000, aprPercent: 5.5, minimumPaymentCents: 28_000 },
   ];
 

@@ -8,6 +8,7 @@ import { generateInsights } from '../lib/advisor';
 import { formatMoney, formatMoneyCompact, formatPercent, toCents, toDollars } from '../lib/money';
 import { CategoryTrendChart, DonutChart, TrendChart } from './charts';
 import { AlertIcon, Card, CheckIcon, ChevronIcon, EmptyState, Field, InfoIcon, Segmented, Sheet } from './ui';
+import { useAnimatedNumber } from './motion';
 
 /**
  * The dashboard.
@@ -322,19 +323,23 @@ function PeriodControls({
 function BalanceHeader({ snapshot, bufferMode }: { snapshot: Snapshot; bufferMode: boolean }) {
   const negative = snapshot.remainingBalanceCents < 0;
   const safeNegative = snapshot.safeToSpendCents < 0;
+  // Counting the figure to its new value makes an edit visibly land on the
+  // headline number, which is the whole feedback loop of logging an expense.
+  const animatedRemaining = useAnimatedNumber(snapshot.remainingBalanceCents);
+  const animatedSafe = useAnimatedNumber(snapshot.safeToSpendCents);
 
   return (
     <div className="card">
       <div className="balance">
         <div className="balance__label">Remaining balance</div>
         <div className={`balance__value ${negative ? 'neg' : ''}`}>
-          {formatMoneyCompact(snapshot.remainingBalanceCents)}
+          {formatMoneyCompact(animatedRemaining)}
         </div>
 
         <div className="balance__safe">
           <span className="balance__safe-label">Safe to spend</span>
           <span className={`balance__safe-value ${safeNegative ? 'neg' : 'pos'}`}>
-            {formatMoneyCompact(snapshot.safeToSpendCents)}
+            {formatMoneyCompact(animatedSafe)}
           </span>
         </div>
 

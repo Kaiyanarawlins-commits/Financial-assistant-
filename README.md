@@ -8,7 +8,7 @@ The name is the thesis: a compass gives direction, and this app's job is to show
 ```bash
 npm install
 npm run dev               # http://localhost:5173
-npm test                  # 80 tests over the calculation engine
+npm test                  # 148 tests over the engine, agents and guardrails
 npm run build             # typecheck + production bundle
 npm run build:standalone  # everything inlined into one portable HTML file
 ```
@@ -127,8 +127,19 @@ src/
     storage.ts          localStorage persistence with forward-compatible merge
     seed.ts             Demo data, generated relative to today
     exporter.ts         CSV export for tax prep
+    advisorConfig.ts    Advisor backend settings (API key kept out of AppState)
+    agents/
+      facts.ts          Precomputed figures every specialist answers from
+      roster.ts         The seven specialists: prompts, tools, local answers
+      router.ts         Deterministic keyword routing
+      calculators.ts    Financial maths for hypotheticals
+      tools.ts          Tool schemas + local execution
+      guardrails.ts     Pre-flight, prompt and post-flight enforcement
+      matching.ts       Word-boundary keyword matching
+      claude.ts         Claude-backed path (Fable 5) with the tool loop
   state/store.tsx       Reducer + context
-  components/           Dashboard, charts, forms, advisor, settings
+  components/           Dashboard, charts, forms, advisor, settings, motion
+server/proxy.mjs        Keeps the API key off the client
 ```
 
 Three decisions shaped the rest:
@@ -155,29 +166,113 @@ so light and dark mode work for free.
 
 ## The advisor
 
-`ADVISOR_SYSTEM_PROMPT` in `lib/advisor.ts` holds the spec'd persona verbatim — it is the contract for any
-model-backed deployment. What ships is a deterministic local implementation answering from the same scope and
-refusing the same things, so the guardrails hold whether or not a model is wired up behind it, and no financial data
-leaves the device.
+The first version was one prompt covering credit, debt, investing and budgeting, so it could only say what was true
+of all four. Ask about credit and it printed the same essay whether you owed $340 or $34,000. It read as
+knowledgeable and was useless.
 
-Enforced, with tests:
+It is now three things: a facts layer, a roster of specialists, and a pluggable backend.
 
-- **No specific securities.** Refuses buy/sell/hold on any named stock or coin, then pivots to explaining the asset
-  class. Matched on question *intent* rather than a ticker list, since no list stays current.
-- **No implied guarantees.** Names FDIC insurance and Treasuries as the real "safe" instruments and says plainly that
-  above-market guaranteed returns are either mispriced or misrepresented.
-- **No individualized tax or legal advice.** Explains the general principle, directs to a CPA or attorney.
-- **Volatility named, not softened.** The crypto answer leads with the 50–80% drawdown record.
-- **Sensitive identifiers redacted at capture.** `redactSensitive` strips SSNs, card and account numbers, and
-  declared credentials from user input *before* it enters the transcript — the cheapest place to not store an SSN is
-  before it is ever written down.
+### The facts layer
 
-The advisor context object carries amounts and categories only. That is a structural property, not a policy: there is
-no field on it that could hold an account identifier.
+`lib/agents/facts.ts` computes precise, citable figures before anyone answers anything — per-category deltas against
+last month and the six-month average, monthly interest cost per debt, credit utilization per card, emergency-fund
+targets sized from *essentials* rather than income, runway in months, goal timelines at the current leftover.
 
-Beyond Q&A it produces **proactive insights** (over-cap categories, a category rising three months running,
-subscription load, fixed costs eating the budget) and a **monthly recap** with the biggest change versus the prior
-month and one actionable tip.
+This is what converts "keep your utilization low" into "your store card is at 77% — paying $560 before the statement
+closes takes it under 30%, and $800 takes it under 10%". The same figures are rendered into the system prompt, so
+even a single-turn answer with no tool calls is anchored to real data.
+
+`simulateMonthlyChange` prices any proposed change: what cutting $100/month does to the savings rate, the debt
+payoff date, total interest, and each goal.
+
+### The specialists
+
+| Specialist | Owns |
+|---|---|
+| Budget Analyst | Cash flow, category drift, affordability |
+| Debt Strategist | Payoff order, interest cost, rate reduction |
+| Credit Coach | Score factors and real utilization per card |
+| Savings Planner | Emergency fund sizing, goal timelines, savings rate |
+| Investing Educator | Asset classes and retirement accounts — never a recommendation |
+| Subscription Auditor | Recurring charges and what they cost annually |
+| Tax & Records Guide | General principles and export for a preparer |
+
+Each carries its own system prompt stating the analysis it must perform *before* answering, its own tool subset, and
+a deterministic local implementation. A keyword-scored router picks one — deterministic and local, because routing
+has to work offline and spending a round trip to decide who answers doubles every question's latency.
+
+### Hypotheticals
+
+Being grounded in your data must not make the advisor narrow. "If I earned $80k, what house could I afford?" is a
+good question about figures the app has never seen, and answering it with "I can only see your logged expenses"
+would be a worse failure than vagueness.
+
+`lib/agents/calculators.ts` holds pure financial maths — compound growth, loan payments, payoff time, savings
+timelines, the 28/36 affordability rule, the 4% rule — exposed to the model as a `calculate` tool and used directly
+by the offline path. Compound interest computed token-by-token is exactly what a language model gets subtly and
+confidently wrong, so it never does the arithmetic itself.
+
+Scenario answers state which figures are supposed and which are yours, and list their assumptions.
+
+### Backends
+
+**Built-in** (default): the specialists answer deterministically from the facts. No key, no network, works offline.
+
+**Claude**: the same specialists, the same facts, the same tools, with open-ended reasoning. Defaults to
+`claude-fable-5`. Thinking is always on for that family, so the `thinking` parameter is omitted entirely — sending
+`budget_tokens` is a 400 — and depth is controlled through `output_config.effort`. Server-side fallbacks are enabled
+so a policy decline on a benign finance question is not a dead end.
+
+The tool loop is written out rather than delegated to the SDK's tool runner, for reasons specific to this app: every
+tool call is surfaced in the UI as it runs ("Ran your debt payoff numbers"), which is most of what makes the advisor
+feel like it is working rather than improvising; and the iteration count needs a hard ceiling, because a runaway
+loop on a consumer app spends the user's money.
+
+### Guardrails
+
+Enforced in three places, because "the prompt says not to" is not a control:
+
+1. **Pre-flight** — the question is screened before any model call, so a request for a stock pick is refused locally,
+   costs nothing, and cannot be talked around by the prompt.
+2. **In the system prompt** — every specialist inherits the hard rules.
+3. **Post-flight** — output is scanned before display.
+
+Never recommends a specific security or coin. Never implies a guaranteed return. Never advises on your individual
+tax or legal situation. Names volatility plainly rather than softening it. `redactSensitive` strips SSNs, card and
+account numbers and declared credentials from input *before* it enters the transcript or the network — the cheapest
+place to not store an SSN is before it is ever written down.
+
+### Keys
+
+The API key lives in its own `localStorage` slot, deliberately outside `AppState` — `AppState` is what "Download
+backup" serialises, and a key there would be written into a JSON file people email to themselves.
+
+A key in a browser is readable by any script on the page. That is acceptable for a personal build on your own
+device and wrong for anything deployed, so `server/proxy.mjs` is a dependency-free Node proxy that holds the key
+server-side, allowlists origins, and forwards only `/v1/messages`:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... node server/proxy.mjs
+```
+
+Then set the proxy URL in **Settings → AI advisor**. The Settings panel says all of this in the app, at the point
+where the choice is made.
+
+---
+
+## Appearance and motion
+
+**Theme** follows your device by default and can be forced to Light or Dark in Settings. Three states, not two: an
+explicit choice stamps `data-theme` on the root element and wins over the OS in both directions; `system` removes
+the stamp so `prefers-color-scheme` decides. The `<meta name="theme-color">` is updated to match, or the phone's
+status bar keeps painting the opposite ground behind the app.
+
+**Motion** is limited to places where it carries meaning. Goal bars fill from empty and travel amber → yellow-green
+→ green as they complete, so progress is readable from hue before you read the number. The headline balance counts
+to its new value, so editing an expense visibly lands on the figure. Tool calls stream in as the advisor works.
+
+Every animation checks `prefers-reduced-motion` and snaps to the final value when it is set — animated counting
+numbers are a known migraine and vestibular trigger, and the figure *is* the content.
 
 ---
 
@@ -194,7 +289,9 @@ month and one actionable tip.
 | Monthly / YTD / custom range | Yes |
 | Recurring vs. one-time split | Yes |
 | Trend across past months | Yes |
-| AI advisor with guardrails | Yes — local implementation |
+| AI advisor with guardrails | Yes — 7 specialists, local or Claude-backed |
+| Hypothetical / scenario questions | Yes — real calculators, not estimates |
+| Light / dark / system theme | Yes |
 | Savings goals with safe-to-spend reserve | Yes |
 | Spending caps per category | Yes |
 | Debt payoff, snowball vs. avalanche | Yes — full amortisation, flags unpayable plans |
@@ -212,14 +309,16 @@ The last two are honest gaps rather than oversights: both require infrastructure
 
 ## Testing
 
-80 tests, all against the pure modules:
+148 tests, all against the pure modules:
 
 ```
 finance.test.ts   45  balance maths, recurring expansion, idempotency, month-length
                       clamping, leap years, safe-to-spend, buffer mode, cash-on-hand
                       anchoring, income schedules, irregular income, categories,
                       trends, reminders
-advisor.test.ts   26  redaction, every guardrail, topic matching, insights
+agents.test.ts    68  facts, routing, calculators, figure parsing, guardrails,
+                      tool execution, specialist answers, hypotheticals
+advisor.test.ts   26  redaction, guardrails, topic matching, insights
 debt.test.ts       9  payoff simulation, strategy comparison, unpayable plans
 ```
 
@@ -232,6 +331,15 @@ Two bugs the suite caught during development, both worth noting because they wer
 
 2. **The overspend insight fired when no income was logged at all**, telling a user who simply had not finished
    setting up that they were living beyond their means. Now a distinct "add your income" insight handles that case.
+
+3. **The agent router matched keywords as bare substrings**, so "a**irs**peed" contained "irs" and a nonsense
+   question routed to the Tax & Records Guide. The same file then made the *opposite* mistake: `\binvest\b` missed
+   "invested", so scenario questions fell through to a generic answer that looked plausible. `agents/matching.ts`
+   now handles both, with regression tests naming each failure.
+
+4. **The goal progress bar never rendered its fill.** `.goal__fill` is a `<span>` and its track is not a flex
+   container, so it stayed `display: inline` and ignored width and height entirely. Caught only by measuring the
+   rendered box — an earlier check read the inline `style` attribute, which was set correctly the whole time.
 
 Verified in Chromium end to end: live recalculation on add (−$250 → balance moves exactly $250), category
 drill-down, guardrail refusals rendering, buffer mode changing safe-to-spend, persistence across reload, and no

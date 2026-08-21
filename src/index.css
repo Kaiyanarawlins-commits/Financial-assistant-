@@ -803,17 +803,120 @@ p { margin: 0; }
   line-height: 1.45;
 }
 
+/* Agent attribution ------------------------------------------------------ */
+
+.msg-group { display: grid; gap: 6px; }
+
+.agent-tag {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  padding-left: 3px;
+}
+
+.agent-card {
+  border-left: 3px solid var(--accent);
+}
+
+/* The advisor showing its work: which figures it actually looked at. */
+.trace {
+  display: grid;
+  gap: 3px;
+  padding: 7px 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-width: 88%;
+}
+
+.trace__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  animation: trace-in 0.28s ease both;
+}
+
+.trace__item svg { color: var(--positive); flex: 0 0 auto; }
+.trace__item--live { color: var(--text-faint); }
+
+@keyframes trace-in {
+  from { opacity: 0; transform: translateX(-5px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Thinking indicator ------------------------------------------------------ */
+
+.msg--thinking { padding: 14px 16px; width: fit-content; }
+
+.typing { display: inline-flex; gap: 4px; align-items: center; }
+
+.typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  animation: typing 1.1s ease-in-out infinite;
+}
+
+.typing i:nth-child(2) { animation-delay: 0.15s; }
+.typing i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes typing {
+  0%, 60%, 100% { opacity: 0.28; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+/* Staggered entrance for insight lists. */
+.alert--enter { animation: alert-in 0.34s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes alert-in {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: none; }
+}
+
 /* Progress bars for goals ------------------------------------------------ */
 
 .goal__bar {
-  height: 7px;
+  height: 9px;
   border-radius: 999px;
   background: var(--surface-3);
   overflow: hidden;
   margin: 8px 0 6px;
+  position: relative;
 }
 
-.goal__fill { height: 100%; background: var(--positive); border-radius: 999px; transition: width 0.35s; }
+.goal__fill {
+  /* Block, not the default inline: the track is not a flex container, so an
+     inline span would ignore width and height entirely and render nothing. */
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  position: relative;
+  /* Width and colour are driven per-frame by useAnimatedPercent, so no CSS
+     transition here — two animations on one property fight each other. */
+}
+
+/* A soft leading highlight, so the bar reads as filling rather than resizing. */
+.goal__fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.28) 100%);
+}
+
+.goal__fill--complete { animation: goal-pulse 1.6s ease-out 1; }
+
+@keyframes goal-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(45, 200, 130, 0.5); }
+  100% { box-shadow: 0 0 0 9px rgba(45, 200, 130, 0); }
+}
 
 /* Tables ----------------------------------------------------------------- */
 

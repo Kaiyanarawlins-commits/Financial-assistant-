@@ -129,6 +129,15 @@ export interface Debt {
   /** Annual percentage rate, e.g. 22.99 */
   aprPercent: number;
   minimumPaymentCents: number;
+  /**
+   * Credit limit, for revolving accounts only.
+   *
+   * Without it the advisor can talk about utilization but cannot compute the
+   * user's actual figure — and utilization is ~30% of a credit score and the
+   * fastest thing they can move. A generic explanation is exactly the vague
+   * answer worth avoiding.
+   */
+  creditLimitCents?: number;
 }
 
 export interface NetWorthSnapshot {
@@ -160,6 +169,11 @@ export interface Settings {
   reminderLeadDays: number;
   /** Household mode simply relabels the UI for a shared budget. */
   householdMode: boolean;
+  /**
+   * Colour scheme. 'system' follows the device setting via prefers-color-scheme;
+   * the explicit values stamp data-theme on the root element and win over it.
+   */
+  theme: 'system' | 'light' | 'dark';
   /**
    * The user's actual account balance, and the date it was true.
    *

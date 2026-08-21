@@ -21,12 +21,21 @@ const distDir = join(root, 'dist');
 const assetsDir = join(distDir, 'assets');
 
 const assets = readdirSync(assetsDir);
-const jsName = assets.find((f) => f.endsWith('.js'));
-const cssName = assets.find((f) => f.endsWith('.css'));
+const jsFiles = assets.filter((f) => f.endsWith('.js'));
+const cssFiles = assets.filter((f) => f.endsWith('.css'));
 
-if (!jsName || !cssName) {
-  throw new Error(`Expected one .js and one .css in ${assetsDir}; found: ${assets.join(', ')}`);
+// Assert exactly one of each rather than picking the first match. A multi-chunk
+// build silently produced a 17 kB "standalone" file containing a 30-byte stub
+// instead of the app — it looked like a successful build and was not.
+if (jsFiles.length !== 1 || cssFiles.length !== 1) {
+  throw new Error(
+    `Expected exactly one .js and one .css in ${assetsDir}, found ${jsFiles.length} JS and ${cssFiles.length} CSS ` +
+      `(${assets.join(', ')}). Build with VITE_SINGLE_FILE=1 so dynamic imports are inlined.`,
+  );
 }
+
+const [jsName] = jsFiles;
+const [cssName] = cssFiles;
 
 const js = readFileSync(join(assetsDir, jsName), 'utf8');
 const css = readFileSync(join(assetsDir, cssName), 'utf8');

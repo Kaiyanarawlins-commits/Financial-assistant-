@@ -20,6 +20,7 @@ export function emptyState(): AppState {
       irregularLookbackMonths: 3,
       reminderLeadDays: 3,
       householdMode: false,
+      theme: 'system',
     },
   };
 }

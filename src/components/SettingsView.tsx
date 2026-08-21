@@ -11,7 +11,14 @@ import {
 } from '../lib/exporter';
 import { formatMoney, toCents, toDollars } from '../lib/money';
 import { deserializeState, serializeState } from '../lib/storage';
-import { Card, Field, PlusIcon, Sheet, Toggle } from './ui';
+import {
+  MODEL_OPTIONS,
+  defaultAdvisorConfig,
+  loadAdvisorConfig,
+  saveAdvisorConfig,
+  type AdvisorConfig,
+} from '../lib/advisorConfig';
+import { AlertIcon, Card, Field, InfoIcon, PlusIcon, Segmented, Sheet, Toggle } from './ui';
 
 /** Settings: modes, categories and caps, data export and reset. */
 export function SettingsView({ reference }: { reference: string }) {
@@ -31,6 +38,26 @@ export function SettingsView({ reference }: { reference: string }) {
 
   return (
     <div className="stack">
+      <Card title="Appearance">
+        <div className="row row--between row--wrap" style={{ gap: 10 }}>
+          <span className="grow small muted" style={{ minWidth: 160 }}>
+            System follows your device's light/dark setting and changes with it.
+          </span>
+          <Segmented
+            ariaLabel="Colour scheme"
+            value={state.settings.theme ?? 'system'}
+            onChange={(theme) => dispatch({ type: 'settings/update', patch: { theme } })}
+            options={[
+              { value: 'system', label: 'System' },
+              { value: 'light', label: 'Light' },
+              { value: 'dark', label: 'Dark' },
+            ]}
+          />
+        </div>
+      </Card>
+
+      <AdvisorSettings />
+
       <Card title="Account balance">
         <p className="small muted" style={{ marginBottom: 12 }}>
           Safe-to-spend is only exact if it knows what you actually have. Enter your balance and the date it was
@@ -307,6 +334,138 @@ export function SettingsView({ reference }: { reference: string }) {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * AI advisor configuration.
+ *
+ * The built-in specialists are the default and need nothing. Connecting Claude
+ * swaps the deterministic answers for open-ended reasoning over the same facts
+ * and the same tools — the guardrails and the redaction apply either way.
+ */
+function AdvisorSettings() {
+  const [config, setConfig] = useState<AdvisorConfig>(() => loadAdvisorConfig());
+
+  const update = (patch: Partial<AdvisorConfig>) => {
+    const next = { ...config, ...patch };
+    setConfig(next);
+    saveAdvisorConfig(next);
+  };
+
+  const usingKeyInBrowser = config.backend === 'claude' && !config.proxyUrl && config.apiKey.length > 0;
+
+  return (
+    <Card title="AI advisor">
+      <div className="row row--between row--wrap" style={{ gap: 10, marginBottom: 12 }}>
+        <span className="grow small muted" style={{ minWidth: 170 }}>
+          Seven specialists answer either way. This chooses what powers them.
+        </span>
+        <Segmented
+          ariaLabel="Advisor engine"
+          value={config.backend}
+          onChange={(backend) => update({ backend })}
+          options={[
+            { value: 'local', label: 'Built-in' },
+            { value: 'claude', label: 'Claude' },
+          ]}
+        />
+      </div>
+
+      {config.backend === 'local' ? (
+        <div className="alert">
+          <span className="alert__icon"><InfoIcon /></span>
+          <span className="grow small">
+            The built-in advisor runs entirely on your device — no key, no network, works offline. It answers from
+            the same computed figures, but follows fixed reasoning rather than responding to open-ended questions.
+          </span>
+        </div>
+      ) : (
+        <div className="stack" style={{ gap: 12 }}>
+          <Field
+            label="Proxy URL"
+            hint="Recommended. A small server that holds your key and forwards requests — see server/ in the repo. Leave blank to call the API directly from this browser."
+          >
+            <input
+              className="input"
+              placeholder="https://your-proxy.example.com"
+              value={config.proxyUrl}
+              onChange={(event) => update({ proxyUrl: event.target.value.trim() })}
+            />
+          </Field>
+
+          {!config.proxyUrl && (
+            <Field label="Anthropic API key" hint="Stored only in this browser, and never included in a backup export.">
+              <input
+                className="input"
+                type="password"
+                autoComplete="off"
+                placeholder="sk-ant-…"
+                value={config.apiKey}
+                onChange={(event) => update({ apiKey: event.target.value.trim() })}
+              />
+            </Field>
+          )}
+
+          {usingKeyInBrowser && (
+            <div className="alert alert--danger">
+              <span className="alert__icon"><AlertIcon /></span>
+              <span className="grow small">
+                <strong>A key in a browser is readable by any script on the page.</strong> That is acceptable for a
+                personal build on your own device, and not acceptable for anything you share or deploy publicly — the
+                key would be extractable by anyone who opens it. Use the proxy for that.
+              </span>
+            </div>
+          )}
+
+          <Field label="Model">
+            <select
+              className="select"
+              value={config.model}
+              onChange={(event) => update({ model: event.target.value as AdvisorConfig['model'] })}
+            >
+              {MODEL_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label} — {option.note}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="Reasoning effort" hint="Higher thinks longer and costs more. Medium suits most questions.">
+            <select
+              className="select"
+              value={config.effort}
+              onChange={(event) => update({ effort: event.target.value as AdvisorConfig['effort'] })}
+            >
+              <option value="low">Low — quick answers</option>
+              <option value="medium">Medium — balanced</option>
+              <option value="high">High — hardest questions</option>
+            </select>
+          </Field>
+
+          <div className="row" style={{ gap: 8 }}>
+            <button
+              type="button"
+              className="btn btn--sm"
+              onClick={() => {
+                const cleared = { ...defaultAdvisorConfig(), backend: 'claude' as const };
+                setConfig(cleared);
+                saveAdvisorConfig(cleared);
+              }}
+            >
+              Clear key
+            </button>
+          </div>
+
+          <p className="tiny faint">
+            Your amounts and categories are sent to Anthropic to answer each question. Account numbers, SSNs and
+            credentials are stripped before anything leaves the device, and the app never stores them in the first
+            place.
+          </p>
+        </div>
+      )}
+    </Card>
   );
 }
 

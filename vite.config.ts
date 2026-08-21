@@ -10,6 +10,14 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   base: process.env.VITE_BASE ?? '/',
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      // The single-file build has nowhere to put a second chunk. Dynamic
+      // imports (the Anthropic SDK pulls in a couple) would otherwise emit
+      // separate files that the inliner cannot represent.
+      output: process.env.VITE_SINGLE_FILE ? { inlineDynamicImports: true } : {},
+    },
+  },
   test: {
     globals: true,
     environment: 'node',

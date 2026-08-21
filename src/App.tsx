@@ -54,6 +54,24 @@ function Shell() {
     };
   }, []);
 
+  // Stamp the theme choice on the root element. 'system' removes the stamp so
+  // the CSS falls through to prefers-color-scheme; the explicit values win over
+  // it in both directions. The meta theme-color is updated to match, or the
+  // phone's status bar keeps painting the opposite ground behind the app.
+  useEffect(() => {
+    const root = document.documentElement;
+    const choice = state.settings.theme ?? 'system';
+    if (choice === 'system') delete root.dataset.theme;
+    else root.dataset.theme = choice;
+
+    const dark =
+      choice === 'dark' ||
+      (choice === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+    for (const tag of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) {
+      tag.content = dark ? '#0b0e14' : '#f6f7f9';
+    }
+  }, [state.settings.theme]);
+
   const editing = expenseSheet?.id ? state.expenses.find((e) => e.id === expenseSheet.id) : undefined;
 
   const alertCount =
