@@ -9,6 +9,7 @@ import {
   parseYears,
   payoffTime,
   projectGrowth,
+  detectAssumptions,
   readSavingsScenario,
   retirementTarget,
   timeToTarget,
@@ -810,5 +811,123 @@ describe('income-minus-expenses scenarios', () => {
     expect(reply).not.toContain('$6,800.00');
     expect(reply).not.toMatch(/keeping \*\*\d+%\*\* of your income/);
     expect(reply).toMatch(/not the numbers you asked about|figures you gave me/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('scenario refinement across turns', () => {
+  const state = demo();
+  const OPENING =
+    'if i make 5k a month and have expenses totalling 1.5k a month how lomg would it take me to save 10k';
+
+  function thread(...questions: string[]) {
+    let memory = emptyMemory();
+    const replies: string[] = [];
+    for (const question of questions) {
+      const reply = askLocally(question, state, REFERENCE, memory);
+      memory = reply.memory;
+      replies.push(reply.text);
+    }
+    return { replies, memory };
+  }
+
+  it('remembers the scenario it was given', () => {
+    const { memory } = thread(OPENING);
+    expect(memory.lastScenario?.targetCents).toBe(1_000_000);
+    expect(memory.lastScenario?.monthlyIncomeCents).toBe(500_000);
+    expect(memory.lastScenario?.monthlyContributionCents).toBe(350_000);
+  });
+
+  it('records the questions it asked so it can receive the answers', () => {
+    const { memory } = thread(OPENING);
+    expect(memory.openQuestions.length).toBeGreaterThan(0);
+    expect(memory.openQuestions.join(' ')).toMatch(/gross/i);
+  });
+
+  // The reported failure: answering the advisor's own question restarted it.
+  it('applies both corrections and revises the estimate', () => {
+    const { replies } = thread(OPENING, 'this does not include ireegular cost and this i gross');
+    const second = replies[1]!;
+
+    expect(second).toMatch(/Revised/);
+    // $1,500 uplifted 15%, and gross converted to a take-home band.
+    expect(second).toContain('$1,725.00');
+    expect(second).toContain('$3,600.00');
+    expect(second).toContain('$4,000.00');
+    expect(second).toMatch(/5 mo/);
+    expect(second).toMatch(/6 mo/);
+    // Never the stored demo data.
+    expect(second).not.toContain('$6,800.00');
+    expect(second).not.toContain('$2,852.03');
+    expect(second).not.toMatch(/Here is where you stand/);
+  });
+
+  it('parses a typo\'d "ireegular"', () => {
+    expect(detectAssumptions('this does not include ireegular cost').expensesIncludeIrregular).toBe(false);
+    expect(detectAssumptions('yes it includes irregular costs').expensesIncludeIrregular).toBe(true);
+  });
+
+  it('reads gross and take-home statements', () => {
+    expect(detectAssumptions('that is gross').incomeIsGross).toBe(true);
+    expect(detectAssumptions("it's my take-home").incomeIsGross).toBe(false);
+    expect(detectAssumptions('after tax').incomeIsGross).toBe(false);
+    expect(detectAssumptions('nothing relevant').incomeIsGross).toBeUndefined();
+  });
+
+  it('collapses the range to one date once take-home is confirmed', () => {
+    const { replies } = thread(OPENING, 'that 5k is my take-home and it includes irregular costs');
+    const second = replies[1]!;
+    expect(second).toMatch(/Updated/);
+    expect(second).toContain('$3,500.00');
+    expect(second).toMatch(/3 mo/);
+    expect(second).not.toMatch(/Worst case/);
+  });
+
+  it('says a target is unreachable once corrections eat the surplus', () => {
+    const { replies } = thread(
+      'if i make 2k a month and have expenses of 1.6k a month how long to save 10k',
+      'that is gross and it excludes irregular costs',
+    );
+    expect(replies[1]).toMatch(/not reachable|nothing left over/i);
+    expect(replies[1]).not.toContain('$6,800.00');
+  });
+
+  it('treats a long leading-demonstrative reply as a follow-up', () => {
+    const { memory } = thread(OPENING);
+    const resolution = resolveReferences(
+      'this does not include ireegular cost and this i gross',
+      memory,
+      state,
+    );
+    expect(resolution.isFollowUp).toBe(true);
+  });
+
+  // Regression: a correction carrying a new figure merged only the assumption,
+  // so the old income stayed in place and the date came from a number the user
+  // had just replaced.
+  it('adopts a figure restated in a later turn', () => {
+    const { replies, memory } = thread(
+      OPENING,
+      'this does not include ireegular cost and this i gross',
+      'my take home is 3900',
+    );
+    expect(memory.lastScenario?.monthlyIncomeCents).toBe(390_000);
+    const third = replies[2]!;
+    expect(third).toContain('$3,900.00');
+    expect(third).toContain('$2,175.00'); // 3,900 − 1,725
+    expect(third).toMatch(/5 mo/);
+    expect(third).not.toContain('$5,000.00');
+  });
+
+  it('keeps the uplifted expense figure across turns', () => {
+    const { memory } = thread(OPENING, 'this is gross and excludes irregular costs', 'my take home is 4200');
+    expect(memory.lastScenario?.assumptions.expensesIncludeIrregular).toBe(false);
+    expect(memory.lastScenario?.assumptions.incomeIsGross).toBe(false);
+  });
+
+  it('keeps blank lines between sections so the answer is readable', () => {
+    const { replies } = thread(OPENING, 'this is gross');
+    expect(replies[1]).toContain('\n\n');
   });
 });

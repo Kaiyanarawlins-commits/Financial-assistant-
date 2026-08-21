@@ -1,6 +1,13 @@
 import type { AppState } from '../../types';
 import { formatMoney } from '../money';
 import type { AdvisorFacts } from './facts';
+import {
+  detectAssumptions,
+  isUsableScenario,
+  mergeScenario,
+  readSavingsScenario,
+  type SavingsScenario,
+} from './calculators';
 import { GLOSSARY, getTerm, termsIn } from './glossary';
 import { containsTerm } from './matching';
 import type { AgentId } from './roster';
@@ -46,6 +53,17 @@ export interface ConversationMemory {
   lastRecommendation: string | null;
   /** Monthly figure attached to the last suggestion, for "how much would that save?". */
   lastProposedMonthlyDeltaCents: number | null;
+  /**
+   * The scenario under discussion, carried so a later turn can refine it.
+   *
+   * Without this the advisor asked "is that gross or take-home?", the user
+   * answered, and there was nothing left to apply the answer to — so the reply
+   * fell through to a summary of stored data. Asking a question you cannot
+   * receive the answer to is worse than not asking.
+   */
+  lastScenario: SavingsScenario | null;
+  /** Questions the advisor asked that have not been answered yet. */
+  openQuestions: string[];
   turns: Turn[];
 }
 
@@ -57,6 +75,8 @@ export function emptyMemory(): ConversationMemory {
     lastQuestion: null,
     lastRecommendation: null,
     lastProposedMonthlyDeltaCents: null,
+    lastScenario: null,
+    openQuestions: [],
     turns: [],
   };
 }
@@ -154,10 +174,19 @@ export function resolveReferences(
   const wordCount = trimmed.split(/\s+/).length;
 
   const opener = FOLLOW_UP_OPENER.test(trimmed);
-  const demonstrative = DEMONSTRATIVE.test(trimmed) && wordCount <= 9;
+  // A demonstrative *leading* the sentence points backwards however long the
+  // sentence is — "this does not include irregular costs and this is gross" is
+  // plainly a continuation, and an arbitrary nine-word cap rejected it.
+  const leadingDemonstrative = /^\s*(?:that|this|those|these|it)\b/i.test(trimmed);
+  const demonstrative = DEMONSTRATIVE.test(trimmed) && wordCount <= 14;
   const bare = wordCount <= 6 && BARE_REFERENCE.test(trimmed);
+  // Answering something the advisor asked is a follow-up by definition.
+  const answersOpenQuestion =
+    memory.openQuestions.length > 0 && Object.keys(detectAssumptions(trimmed)).length > 0;
 
-  const isFollowUp = Boolean(memory.lastQuestion) && (opener || demonstrative || bare);
+  const isFollowUp =
+    Boolean(memory.lastQuestion) &&
+    (opener || leadingDemonstrative || demonstrative || bare || answersOpenQuestion);
   if (!isFollowUp) {
     return { question: trimmed, isFollowUp: false, subject: mentioned[0] ?? null };
   }
@@ -190,10 +219,25 @@ export function rememberQuestion(
   state: AppState,
 ): ConversationMemory {
   const mentioned = entitiesIn(question, state);
+
+  // A question that states a full scenario starts a new one; a question that
+  // only supplies an assumption refines the one already running.
+  const fresh = readSavingsScenario(question);
+  const refinement = detectAssumptions(question);
+  const lastScenario = isUsableScenario(fresh)
+    ? fresh
+    : memory.lastScenario
+      ? // Merge both the assumptions and any figure the turn restated.
+        mergeScenario(memory.lastScenario, question)
+      : null;
+
   return {
     ...memory,
     entities: mergeEntities(mentioned, memory.entities),
     lastQuestion: question,
+    lastScenario,
+    // Anything the user has now answered stops being an open question.
+    openQuestions: Object.keys(refinement).length > 0 ? [] : memory.openQuestions,
     turns: [...memory.turns, { role: 'user' as const, text: question }].slice(-MAX_TURNS),
   };
 }
@@ -220,6 +264,7 @@ export function rememberAnswer(
     lastAgent: agent,
     lastRecommendation: extractRecommendation(answer) ?? memory.lastRecommendation,
     lastProposedMonthlyDeltaCents: extractProposedDelta(answer, facts) ?? memory.lastProposedMonthlyDeltaCents,
+    openQuestions: extractQuestions(answer),
     turns: [...memory.turns, { role: 'advisor' as const, text: answer }].slice(-MAX_TURNS),
   };
 }
@@ -260,6 +305,22 @@ function extractRecommendation(answer: string): string | null {
     return sentence;
   }
   return null;
+}
+
+/**
+ * The questions an answer asked.
+ *
+ * Tracked so the next turn can be recognised as a reply to them even when it
+ * looks like a bare fragment — "this is gross" is meaningless on its own and
+ * unambiguous right after "is that gross or take-home?".
+ */
+function extractQuestions(answer: string): string[] {
+  return answer
+    .replace(/\*\*/g, '')
+    .split(/(?<=\?)\s+|\n+/)
+    .map((s) => s.trim())
+    .filter((s) => s.endsWith('?') && s.length > 12)
+    .slice(-3);
 }
 
 /** A dollar figure in the last answer, used as the default for "how much would that save?". */
@@ -312,6 +373,21 @@ export function formatMemory(memory: ConversationMemory): string {
 
   if (memory.lastRecommendation) {
     lines.push(`- Your last suggestion: "${memory.lastRecommendation}". "Why?" refers to this.`);
+  }
+
+  if (memory.lastScenario && isUsableScenario(memory.lastScenario)) {
+    const sc = memory.lastScenario;
+    lines.push(
+      `- Scenario under discussion: target ${formatMoney(sc.targetCents ?? 0)}, saving ${formatMoney(sc.monthlyContributionCents ?? 0)}/month${
+        sc.monthlyIncomeCents !== null
+          ? ` (income ${formatMoney(sc.monthlyIncomeCents)}${sc.assumptions.incomeIsGross === true ? ' GROSS' : sc.assumptions.incomeIsGross === false ? ' take-home' : ''}, expenses ${formatMoney(sc.monthlyExpensesCents ?? 0)}${sc.assumptions.expensesIncludeIrregular === false ? ' EXCLUDING irregular costs' : ''})`
+          : ''
+      }. Apply any correction the user gives to these figures rather than starting over.`,
+    );
+  }
+
+  if (memory.openQuestions.length > 0) {
+    lines.push(`- You asked, and are still waiting on: ${memory.openQuestions.join(' ')}`);
   }
 
   if (memory.lastProposedMonthlyDeltaCents) {

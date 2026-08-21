@@ -6,7 +6,13 @@ import { formatMonths } from '../debt';
 import {
   affordability,
   isHypothetical,
+  IRREGULAR_UPLIFT,
+  WITHHOLDING_HIGH,
+  WITHHOLDING_LOW,
   classifyFigures,
+  estimateNetRange,
+  isAssumptionAnswer,
+  isUsableScenario,
   parseFigures,
   parseRates,
   parseYears,
@@ -410,6 +416,105 @@ function answerHypothetically(question: string, facts: AdvisorFacts): string | n
 export { AGENTS };
 
 /**
+ * Re-runs the scenario with the corrections the user just supplied.
+ *
+ * The advisor asked whether the income was gross and whether the expenses
+ * covered irregular costs. Both answers change the arithmetic, so the answer
+ * has to change with them — restating the original figure, or worse falling
+ * back to stored data, is what made asking the question pointless.
+ */
+function recomputeScenario(memory: ConversationMemory): string {
+  const scenario = memory.lastScenario!;
+  const target = scenario.targetCents ?? 0;
+  const grossIncome = scenario.monthlyIncomeCents;
+  const statedExpenses = scenario.monthlyExpensesCents ?? 0;
+  const { incomeIsGross, expensesIncludeIrregular } = scenario.assumptions;
+
+  const adjustments: string[] = [];
+
+  // Expenses first: the uplift is a single figure, so the range stays one-dimensional.
+  const expenses =
+    expensesIncludeIrregular === false ? Math.round(statedExpenses * (1 + IRREGULAR_UPLIFT)) : statedExpenses;
+  if (expensesIncludeIrregular === false) {
+    adjustments.push(
+      `- **Irregular costs.** Adding the ${Math.round(IRREGULAR_UPLIFT * 100)}% those typically account for takes ${m(statedExpenses)} to about **${m(expenses)}** a month.`,
+    );
+  }
+
+  if (grossIncome === null) {
+    const monthly = Math.max(0, (scenario.monthlyContributionCents ?? 0) - (expenses - statedExpenses));
+    if (monthly <= 0) return unreachable(target, adjustments);
+    const result = timeToTarget(target, monthly);
+    return [
+      `Updated: **${formatMonths(result.months)}**.`,
+      '',
+      ...adjustments,
+      '',
+      `That leaves **${m(monthly)} a month**, so ${m(target)} takes ${formatMonths(result.months)}.`,
+    ].join('\n');
+  }
+
+  // Gross income gives a range rather than a number: withholding depends on
+  // filing status, state and pre-tax deductions this app has never seen.
+  if (incomeIsGross === true) {
+    const net = estimateNetRange(grossIncome);
+    const bestSurplus = net.highCents - expenses;
+    const worstSurplus = net.lowCents - expenses;
+
+    adjustments.push(
+      `- **Gross, not take-home.** At ${m(grossIncome)} gross, withholding of ${Math.round(WITHHOLDING_LOW * 100)}–${Math.round(WITHHOLDING_HIGH * 100)}% puts your take-home somewhere around **${m(net.lowCents)}–${m(net.highCents)}**. That band covers filing status, state tax and pre-tax deductions I cannot see — your payslip has the exact figure.`,
+    );
+
+    if (bestSurplus <= 0) return unreachable(target, adjustments);
+
+    const best = timeToTarget(target, bestSurplus);
+    const worst = worstSurplus > 0 ? timeToTarget(target, worstSurplus) : null;
+
+    return [
+      worst
+        ? `Revised: **${formatMonths(best.months)} to ${formatMonths(worst.months)}** — not the 3 months the first pass suggested.`
+        : `Revised: **at least ${formatMonths(best.months)}**.`,
+      '',
+      'What changed:',
+      ...adjustments,
+      '',
+      `Which leaves **${m(Math.max(0, worstSurplus))}–${m(bestSurplus)} a month** to save, against a ${m(target)} target:`,
+      '',
+      `- Best case (${m(net.highCents)} take-home): **${formatMonths(best.months)}**`,
+      worst
+        ? `- Worst case (${m(net.lowCents)} take-home): **${formatMonths(worst.months)}**`
+        : '- Worst case: the surplus disappears entirely',
+      '',
+      `Give me your actual take-home from a payslip and I will replace that range with a date.`,
+    ]
+      // Only drop the genuinely absent line — filter(Boolean) would also strip
+      // the '' separators and run every section together.
+      .filter((line) => line !== null && line !== undefined)
+      .join('\n');
+  }
+
+  // Take-home confirmed: one number, no range.
+  const surplus = grossIncome - expenses;
+  if (surplus <= 0) return unreachable(target, adjustments);
+  const result = timeToTarget(target, surplus);
+
+  return [
+    `Updated: **${formatMonths(result.months)}**.`,
+    '',
+    ...(adjustments.length > 0 ? ['What changed:', ...adjustments, ''] : []),
+    `${m(grossIncome)} take-home less ${m(expenses)} of expenses leaves **${m(surplus)} a month**. ${m(target)} ÷ ${m(surplus)} = ${(target / surplus).toFixed(2)} months.`,
+  ].join('\n');
+}
+
+function unreachable(targetCents: number, adjustments: string[]): string {
+  return [
+    `On those corrected figures there is **nothing left over each month**, so ${m(targetCents)} is not reachable without changing the income or the expenses.`,
+    '',
+    ...adjustments,
+  ].join('\n');
+}
+
+/**
  * What to say when a scenario cannot be priced offline.
  *
  * Names the figures it read back, so the user can see whether it understood
@@ -454,6 +559,12 @@ function answerFollowUp(
   subject: Entity | null,
 ): string | null {
   const q = question.toLowerCase().trim();
+
+  // The user is answering something the advisor asked about the scenario.
+  // Checked first: a correction to the inputs invalidates every other branch.
+  if (memory.lastScenario && isUsableScenario(memory.lastScenario) && isAssumptionAnswer(question)) {
+    return recomputeScenario(memory);
+  }
 
   // "why?" / "how come?" — justify the last recommendation.
   if (/^(why|how come)\b/.test(q) || /\bwhy (is|does|would|should) that\b/.test(q)) {

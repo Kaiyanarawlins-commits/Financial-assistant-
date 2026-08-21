@@ -405,6 +405,17 @@ export function classifyFigures(text: string): LabelledFigure[] {
   });
 }
 
+/**
+ * What the advisor has been told about a scenario's inputs.
+ *
+ * `null` means "not established yet", which is different from false — the
+ * advisor asks about an unknown and stops asking once it is answered.
+ */
+export interface ScenarioAssumptions {
+  incomeIsGross: boolean | null;
+  expensesIncludeIrregular: boolean | null;
+}
+
 export interface SavingsScenario {
   targetCents: number | null;
   monthlyIncomeCents: number | null;
@@ -413,7 +424,68 @@ export interface SavingsScenario {
   monthlyContributionCents: number | null;
   /** True when the contribution came from income − expenses rather than being stated. */
   derivedFromSurplus: boolean;
+  assumptions: ScenarioAssumptions;
 }
+
+/**
+ * Reads assumption answers out of a reply.
+ *
+ * The advisor asks "is that gross or take-home?" and "does that include
+ * irregular costs?", so it has to understand the answers. The irregular-cost
+ * pattern is deliberately typo-tolerant — this is a chat box, and "ireegular"
+ * should not silently fail to register.
+ */
+export function detectAssumptions(text: string): Partial<ScenarioAssumptions> {
+  const found: Partial<ScenarioAssumptions> = {};
+  const lower = text.toLowerCase();
+
+  if (/\b(gross|before tax|pre[- ]?tax|pretax|before deductions)\b/i.test(lower)) {
+    found.incomeIsGross = true;
+  } else if (/\b(net|take[- ]?home|after tax|post[- ]?tax|in my pocket|what i actually get)\b/i.test(lower)) {
+    found.incomeIsGross = false;
+  }
+
+  const IRREGULAR = /\b(ir+e*g+ular|annual|yearly|one[- ]?off|unexpected|occasional|sinking)\b/i;
+  if (IRREGULAR.test(lower)) {
+    const negated =
+      /\b(does ?n'?o?t include|do ?n'?o?t include|not include|excludes?|excluding|without|not counting|leaves out|missing)\b/i.test(
+        lower,
+      );
+    const affirmed = /\b(includes?|including|covers?|accounts for|has|with)\b/i.test(lower);
+    if (negated) found.expensesIncludeIrregular = false;
+    else if (affirmed) found.expensesIncludeIrregular = true;
+  }
+
+  return found;
+}
+
+/** True when a reply is answering the advisor's assumption questions. */
+export function isAssumptionAnswer(text: string): boolean {
+  return Object.keys(detectAssumptions(text)).length > 0;
+}
+
+/**
+ * Take-home from gross, as a range.
+ *
+ * A single number would be a fabrication: withholding depends on filing status,
+ * state, and pre-tax deductions the app has never seen. FICA alone is 7.65%,
+ * federal effective tax at this income is commonly 10–13% after the standard
+ * deduction, and state ranges from nothing to about 7% — so 20–28% total is a
+ * defensible band. It is labelled an estimate everywhere it is shown, because
+ * the exact figure is on the user's payslip and nowhere else.
+ */
+export const WITHHOLDING_LOW = 0.2;
+export const WITHHOLDING_HIGH = 0.28;
+
+export function estimateNetRange(grossCents: number): { lowCents: number; highCents: number } {
+  return {
+    lowCents: Math.round(grossCents * (1 - WITHHOLDING_HIGH)),
+    highCents: Math.round(grossCents * (1 - WITHHOLDING_LOW)),
+  };
+}
+
+/** Uplift applied to a stated expense figure that excludes irregular costs. */
+export const IRREGULAR_UPLIFT = 0.15;
 
 /** Reads "make 5k a month, spend 1.5k, save 10k" into something answerable. */
 export function readSavingsScenario(text: string): SavingsScenario {
@@ -438,5 +510,50 @@ export function readSavingsScenario(text: string): SavingsScenario {
     monthlyExpensesCents: expenses,
     monthlyContributionCents: stated ?? surplus,
     derivedFromSurplus: stated === null && surplus !== null,
+    assumptions: {
+      incomeIsGross: null,
+      expensesIncludeIrregular: null,
+      ...detectAssumptions(text),
+    },
   };
+}
+
+/**
+ * Folds a later turn's figures into a running scenario.
+ *
+ * A correction often carries a number as well as an assumption — "my take-home
+ * is 3900" both answers the gross/net question and supplies the real figure.
+ * Merging only the assumption left the old $5,000 in place and quietly produced
+ * a date computed from a number the user had just replaced.
+ */
+export function mergeScenario(previous: SavingsScenario, text: string): SavingsScenario {
+  const incoming = readSavingsScenario(text);
+  const assumptions = { ...previous.assumptions, ...detectAssumptions(text) };
+
+  const monthlyIncomeCents = incoming.monthlyIncomeCents ?? previous.monthlyIncomeCents;
+  const monthlyExpensesCents = incoming.monthlyExpensesCents ?? previous.monthlyExpensesCents;
+  const targetCents = incoming.targetCents ?? previous.targetCents;
+
+  // A freshly stated income or expense figure supersedes the derived surplus.
+  const restated = incoming.monthlyIncomeCents !== null || incoming.monthlyExpensesCents !== null;
+  const surplus =
+    monthlyIncomeCents !== null && monthlyExpensesCents !== null
+      ? monthlyIncomeCents - monthlyExpensesCents
+      : null;
+
+  return {
+    targetCents,
+    monthlyIncomeCents,
+    monthlyExpensesCents,
+    monthlyContributionCents: restated
+      ? (surplus ?? previous.monthlyContributionCents)
+      : (previous.monthlyContributionCents ?? surplus),
+    derivedFromSurplus: surplus !== null,
+    assumptions,
+  };
+}
+
+/** True when a scenario has enough to compute a timeline. */
+export function isUsableScenario(scenario: SavingsScenario): boolean {
+  return scenario.targetCents !== null && scenario.monthlyContributionCents !== null;
 }
