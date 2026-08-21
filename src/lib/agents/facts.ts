@@ -100,6 +100,12 @@ export interface AdvisorFacts {
     blendedAprPercent: number;
     minimumsCents: number;
     monthlyInterestCents: number;
+    /**
+     * Debt payments as a share of gross monthly income. The first ratio a
+     * lender looks at and the one an accountant quotes without being asked;
+     * ~36% is the conventional ceiling, ~43% the limit for a qualified mortgage.
+     */
+    debtToIncomePercent: number;
     /** Utilization across all accounts that declare a limit. */
     overallUtilizationPercent: number | null;
     items: DebtFact[];
@@ -268,6 +274,7 @@ export function buildFacts(state: AppState, reference: ISODate, period?: Period)
       blendedAprPercent: blendedAprPercent(state.debts),
       minimumsCents: minimumsTotalCents(state.debts),
       monthlyInterestCents: sumBy(debtItems, (d) => d.monthlyInterestCents),
+      debtToIncomePercent: pct(minimumsTotalCents(state.debts), income),
       overallUtilizationPercent: overallUtilization,
       items: debtItems,
       payoff: comparison
@@ -447,6 +454,9 @@ export function formatFactSheet(facts: AdvisorFacts): string {
     lines.push('');
     lines.push(
       `DEBT: ${m(facts.debt.totalCents)} total, ${p(facts.debt.blendedAprPercent, 2)} blended APR, ${m(facts.debt.minimumsCents)}/mo minimums, ${m(facts.debt.monthlyInterestCents)}/mo interest`,
+    );
+    lines.push(
+      `- Debt-to-income: ${p(facts.debt.debtToIncomePercent)} (conventional ceiling ~36%, qualified-mortgage limit ~43%)`,
     );
     if (facts.debt.overallUtilizationPercent !== null) {
       lines.push(`- Overall credit utilization: ${p(facts.debt.overallUtilizationPercent)}`);

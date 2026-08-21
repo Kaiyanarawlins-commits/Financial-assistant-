@@ -81,13 +81,26 @@ export interface AskOptions {
   config: ClaudeConfig;
   history: Anthropic.Beta.BetaMessageParam[];
   hypothetical: boolean;
+  /** Established context — entities under discussion, terms already defined. */
+  conversationState?: string;
   /** Called as each tool runs, so the UI can show the work in progress. */
   onToolCall?: (call: ToolCallRecord) => void;
   signal?: AbortSignal;
 }
 
 export async function askClaude(question: string, options: AskOptions): Promise<AgentReply> {
-  const { agent, facts, state, reference, config, history, hypothetical, onToolCall, signal } = options;
+  const {
+    agent,
+    facts,
+    state,
+    reference,
+    config,
+    history,
+    hypothetical,
+    conversationState = '',
+    onToolCall,
+    signal,
+  } = options;
 
   // Redact before anything leaves the device, then screen before spending a
   // token. A refusal decided locally cannot be argued out of by the prompt.
@@ -97,7 +110,12 @@ export async function askClaude(question: string, options: AskOptions): Promise<
 
   const client = createClient(config);
   const tools = toolsFor(agent.tools);
-  const system = buildSystemPrompt(agent, formatFactSheet(facts), state.settings.householdMode);
+  const system = buildSystemPrompt(
+    agent,
+    formatFactSheet(facts),
+    state.settings.householdMode,
+    conversationState,
+  );
 
   const messages: Anthropic.Beta.BetaMessageParam[] = [
     ...history,

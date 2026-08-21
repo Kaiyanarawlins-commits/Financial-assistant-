@@ -27,6 +27,9 @@ export interface Route {
 
 const MIN_CONFIDENCE = 0.18;
 
+/** A follow-up must match another specialist this strongly to move the thread. */
+const FOLLOW_UP_SWITCH_CONFIDENCE = 0.45;
+
 function scoreAgent(agent: Agent, question: string): number {
   let score = 0;
   for (const keyword of agent.keywords) {
@@ -38,7 +41,14 @@ function scoreAgent(agent: Agent, question: string): number {
   return score;
 }
 
-export function route(question: string): Route {
+/**
+ * @param previousAgent The specialist that answered last. A follow-up carries
+ *   little routing signal of its own ("why?", "what about the Visa?"), so
+ *   re-routing it from scratch hands the thread to whoever happens to match a
+ *   stray word — the conversational equivalent of being transferred mid-sentence.
+ * @param isFollowUp Whether this turn depends on the previous one.
+ */
+export function route(question: string, previousAgent?: AgentId | null, isFollowUp = false): Route {
   const normalised = question.toLowerCase();
   const hypothetical = isHypothetical(question);
 
@@ -49,11 +59,23 @@ export function route(question: string): Route {
   const total = scored.reduce((sum, entry) => sum + entry.score, 0);
   const best = scored[0];
 
+  // Hold the thread unless the follow-up clearly changes subject. The bar is
+  // deliberately higher than a first question's: switching specialist mid-topic
+  // is more disruptive than answering a tangent from the current one.
+  const sticky = isFollowUp && previousAgent ? AGENTS[previousAgent] : null;
+
   if (!best || best.score === 0 || total === 0) {
-    return { agent: AGENTS.triage, confidence: 0, alternates: [], hypothetical };
+    return sticky
+      ? { agent: sticky, confidence: 0.5, alternates: [], hypothetical }
+      : { agent: AGENTS.triage, confidence: 0, alternates: [], hypothetical };
   }
 
   const confidence = best.score / total;
+
+  if (sticky && confidence < FOLLOW_UP_SWITCH_CONFIDENCE) {
+    return { agent: sticky, confidence, alternates: [best.agent], hypothetical };
+  }
+
   if (confidence < MIN_CONFIDENCE) {
     return {
       agent: AGENTS.triage,

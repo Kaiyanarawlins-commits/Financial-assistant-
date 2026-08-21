@@ -14,7 +14,16 @@ import {
   retirementTarget,
   timeToTarget,
 } from './calculators';
-import { buildFacts, type AdvisorFacts } from './facts';
+import { buildFacts, simulateMonthlyChange, type AdvisorFacts } from './facts';
+import {
+  emptyMemory,
+  formatMemory,
+  rememberAnswer,
+  rememberQuestion,
+  resolveReferences,
+  type ConversationMemory,
+  type Entity,
+} from './conversation';
 import { screenQuestion } from './guardrails';
 import { route } from './router';
 import { containsAny } from './matching';
@@ -25,6 +34,8 @@ export * from './roster';
 export * from './facts';
 export * from './router';
 export * from './guardrails';
+export * from './conversation';
+export * from './glossary';
 export { isConfigured, describeError } from './claude';
 export type { AgentReply, ClaudeConfig, ModelId, ToolCallRecord } from './claude';
 
@@ -37,9 +48,14 @@ export interface AskParams {
   reference: ISODate;
   config?: Partial<ClaudeConfig>;
   history?: Anthropic.Beta.BetaMessageParam[];
+  /** Carried between turns so follow-ups resolve. Omit for a fresh thread. */
+  memory?: ConversationMemory;
   onToolCall?: (call: ToolCallRecord) => void;
   signal?: AbortSignal;
 }
+
+/** A reply plus the conversation state the caller should carry into the next turn. */
+export type AskResult = AgentReply & { memory: ConversationMemory };
 
 /**
  * The advisor entry point.
@@ -50,49 +66,118 @@ export interface AskParams {
  * useful with no API key at all and why a network failure degrades rather than
  * breaks.
  */
-export async function ask(params: AskParams): Promise<AgentReply> {
-  const { question, state, reference, config, history = [], onToolCall, signal } = params;
+export async function ask(params: AskParams): Promise<AskResult> {
+  const {
+    question,
+    state,
+    reference,
+    config,
+    history = [],
+    memory = emptyMemory(),
+    onToolCall,
+    signal,
+  } = params;
+
   const clean = redactSensitive(question);
   const facts = buildFacts(state, reference);
-  const routed = route(clean);
 
-  if (isConfigured(config)) {
-    return askClaude(clean, {
-      agent: routed.agent,
-      facts,
-      state,
-      reference,
-      config: {
-        apiKey: config?.apiKey,
-        proxyUrl: config?.proxyUrl,
-        model: config?.model ?? 'claude-fable-5',
-        effort: config?.effort ?? 'medium',
-      },
-      history,
-      hypothetical: routed.hypothetical,
-      onToolCall,
-      signal,
-    });
-  }
+  // Expand "why?" / "what about the Visa?" against what has been said, then
+  // route the expanded form so a follow-up keeps its specialist.
+  const resolution = resolveReferences(clean, memory, state);
+  const routed = route(resolution.question, memory.lastAgent, resolution.isFollowUp);
+  const afterQuestion = rememberQuestion(memory, clean, state);
 
-  return { text: answerLocally(clean, facts, state, routed.agent), agent: routed.agent, toolCalls: [] };
+  const reply = isConfigured(config)
+    ? await askClaude(resolution.question, {
+        agent: routed.agent,
+        facts,
+        state,
+        reference,
+        config: {
+          apiKey: config?.apiKey,
+          proxyUrl: config?.proxyUrl,
+          model: config?.model ?? 'claude-fable-5',
+          effort: config?.effort ?? 'medium',
+        },
+        history,
+        hypothetical: routed.hypothetical,
+        conversationState: formatMemory(afterQuestion),
+        onToolCall,
+        signal,
+      })
+    : {
+        text: answerLocally(
+          clean,
+          facts,
+          state,
+          routed.agent,
+          afterQuestion,
+          resolution.subject,
+          resolution.isFollowUp,
+        ),
+        agent: routed.agent,
+        toolCalls: [],
+      };
+
+  return {
+    ...reply,
+    memory: rememberAnswer(afterQuestion, reply.text, routed.agent.id, state, facts),
+  };
 }
 
 /** Synchronous local answer, for callers that cannot await (tests, previews). */
-export function askLocally(question: string, state: AppState, reference: ISODate): AgentReply {
+export function askLocally(
+  question: string,
+  state: AppState,
+  reference: ISODate,
+  memory: ConversationMemory = emptyMemory(),
+): AskResult {
   const clean = redactSensitive(question);
   const facts = buildFacts(state, reference);
-  const routed = route(clean);
-  return { text: answerLocally(clean, facts, state, routed.agent), agent: routed.agent, toolCalls: [] };
+  const resolution = resolveReferences(clean, memory, state);
+  const routed = route(resolution.question, memory.lastAgent, resolution.isFollowUp);
+  const afterQuestion = rememberQuestion(memory, clean, state);
+
+  const text = answerLocally(
+    clean,
+    facts,
+    state,
+    routed.agent,
+    afterQuestion,
+    resolution.subject,
+    resolution.isFollowUp,
+  );
+  return {
+    text,
+    agent: routed.agent,
+    toolCalls: [],
+    memory: rememberAnswer(afterQuestion, text, routed.agent.id, state, facts),
+  };
 }
 
-function answerLocally(question: string, facts: AdvisorFacts, state: AppState, agent: Agent): string {
+function answerLocally(
+  question: string,
+  facts: AdvisorFacts,
+  state: AppState,
+  agent: Agent,
+  memory: ConversationMemory,
+  subject: Entity | null,
+  isFollowUp: boolean,
+): string {
   const blocked = screenQuestion(question);
   if (blocked) return blocked.text;
 
   if (isHypothetical(question)) {
     const scenario = answerHypothetically(question, facts);
     if (scenario) return scenario;
+  }
+
+  // A follow-up gets a follow-up answer. Re-running the specialist's opening
+  // summary in response to "why?" is exactly what makes an assistant feel like
+  // it is not listening.
+  if (isFollowUp) {
+    const followUp = answerFollowUp(question, facts, state, memory, subject);
+    if (followUp) return followUp;
   }
 
   return agent.localAnswer(facts, state, question);
@@ -266,3 +351,190 @@ function answerHypothetically(question: string, facts: AdvisorFacts): string | n
 }
 
 export { AGENTS };
+
+// ---------------------------------------------------------------------------
+// Follow-up answers
+// ---------------------------------------------------------------------------
+
+/**
+ * Answers a question that only makes sense in context.
+ *
+ * The offline specialists each open with a full situation summary, which is
+ * right for a first question and wrong for "why?" — re-running the summary is
+ * how an assistant signals it was not listening. These handlers cover the
+ * follow-ups people actually ask; anything else falls through to the specialist.
+ */
+function answerFollowUp(
+  question: string,
+  facts: AdvisorFacts,
+  state: AppState,
+  memory: ConversationMemory,
+  subject: Entity | null,
+): string | null {
+  const q = question.toLowerCase().trim();
+
+  // "why?" / "how come?" — justify the last recommendation.
+  if (/^(why|how come)\b/.test(q) || /\bwhy (is|does|would|should) that\b/.test(q)) {
+    if (!memory.lastRecommendation) return null;
+    return [
+      `Because of the arithmetic behind it.`,
+      '',
+      `The suggestion was: *${memory.lastRecommendation}*`,
+      '',
+      ...whyLines(facts),
+    ].join('\n');
+  }
+
+  // "how much would that save?" — price the figure last discussed.
+  if (/\b(how much|what).{0,20}\b(save|saving|cost|difference|impact)\b/.test(q)) {
+    const delta = memory.lastProposedMonthlyDeltaCents ?? Math.max(0, facts.cashflow.remainingBalanceCents);
+    if (delta <= 0) return null;
+    const result = simulateMonthlyChange(state, facts, delta, 'that change');
+    const lines = [
+      `Redirecting **${m(delta)} a month**:`,
+      '',
+      `- Annually: **${m(result.annualImpactCents)}**`,
+      `- Savings rate: ${p(facts.cashflow.savingsRatePercent)} → **${p(result.newSavingsRatePercent)}**`,
+    ];
+    if (result.debtInterestSavedCents !== null && result.debtInterestSavedCents > 0) {
+      lines.push(`- Interest saved on your debt: **${m(result.debtInterestSavedCents)}**`);
+    }
+    if (result.debtMonthsSaved !== null && result.debtMonthsSaved > 0) {
+      lines.push(`- Debt-free **${result.debtMonthsSaved} months** sooner`);
+    }
+    if (result.goalMonthsSaved !== null && result.goalMonthsSaved > 0) {
+      lines.push(`- Your first goal lands ${result.goalMonthsSaved} months earlier`);
+    }
+    return lines.join('\n');
+  }
+
+  // "is that good?" — benchmark the ratios. Checked before the entity branch,
+  // because it is a question about a number, not a request for a balance.
+  if (/\b(is|does|are)\b.{0,24}\b(good|bad|normal|ok|okay|high|low|healthy|reasonable|typical)\b/.test(q)) {
+    return benchmarkLines(facts).join('\n');
+  }
+
+  // "what about the Visa?" — the named entity, in the current frame.
+  if (subject) {
+    const detail = entityDetail(subject, facts);
+    if (detail) return detail;
+  }
+
+  return null;
+}
+
+function whyLines(facts: AdvisorFacts): string[] {
+  const lines: string[] = [];
+  if (facts.debt.monthlyInterestCents > 0) {
+    lines.push(
+      `Your debt costs **${m(facts.debt.monthlyInterestCents)} a month in interest** — ${m(facts.debt.monthlyInterestCents * 12)} a year before any balance moves. Every dollar redirected there earns your blended ${p(facts.debt.blendedAprPercent, 2)} with certainty, which no investment offers.`,
+    );
+  }
+  if (facts.debt.overallUtilizationPercent !== null && facts.debt.overallUtilizationPercent > 30) {
+    lines.push('');
+    lines.push(
+      `It also moves your utilization, currently ${p(facts.debt.overallUtilizationPercent)}. That is roughly 30% of a credit score and it resets each statement, so it is the fastest lever you have.`,
+    );
+  }
+  if (facts.emergencyFund.monthsCovered < 3) {
+    lines.push('');
+    lines.push(
+      `And it is the difference between covering a surprise from cash or from a card — you are at ${facts.emergencyFund.monthsCovered.toFixed(1)} months of the ${m(facts.emergencyFund.monthlyEssentialsCents)} you need each month.`,
+    );
+  }
+  if (lines.length === 0) {
+    lines.push(
+      `It moves the only two numbers that compound: what you keep each month (currently ${p(facts.cashflow.savingsRatePercent)} of income) and what you owe.`,
+    );
+  }
+  return lines;
+}
+
+function benchmarkLines(facts: AdvisorFacts): string[] {
+  const c = facts.cashflow;
+  const lines = ['Against the usual benchmarks:', ''];
+
+  lines.push(
+    `- **Savings rate ${p(c.savingsRatePercent)}** — the common target is 20%. ${c.savingsRatePercent >= 20 ? 'You clear it.' : `You are ${p(20 - c.savingsRatePercent)} short.`}`,
+  );
+  lines.push(
+    `- **Fixed costs ${p(c.fixedShareOfIncomePercent)} of income** — 50% is the guideline ceiling for needs. ${c.fixedShareOfIncomePercent > 50 ? 'Above it, so discretionary trimming has limited room.' : 'Inside it.'}`,
+  );
+  if (facts.debt.totalCents > 0) {
+    lines.push(
+      `- **Debt-to-income ${p(facts.debt.debtToIncomePercent)}** — lenders use ~36% as the ceiling, ~43% as the limit for a qualified mortgage. ${facts.debt.debtToIncomePercent > 36 ? 'Yours is above the conventional ceiling.' : 'Yours is inside it.'}`,
+    );
+  }
+  if (facts.debt.overallUtilizationPercent !== null) {
+    lines.push(
+      `- **Utilization ${p(facts.debt.overallUtilizationPercent)}** — under 30% is the usual advice, under 10% is better.`,
+    );
+  }
+  lines.push(
+    `- **Emergency cover ${facts.emergencyFund.monthsCovered.toFixed(1)} months** — three to six is the standard range.`,
+  );
+  return lines;
+}
+
+/** The current position on one account, category or goal. */
+function entityDetail(subject: Entity, facts: AdvisorFacts): string | null {
+  if (subject.kind === 'debt') {
+    const debt = facts.debt.items.find((d) => d.id === subject.id);
+    if (!debt) return null;
+    const lines = [
+      `**${debt.name}:** ${m(debt.balanceCents)} at ${p(debt.aprPercent, 2)} APR, costing **${m(debt.monthlyInterestCents)} a month** in interest.`,
+    ];
+    if (debt.utilizationPercent !== undefined && debt.creditLimitCents) {
+      const to30 = Math.max(0, debt.balanceCents - Math.floor(debt.creditLimitCents * 0.3));
+      lines.push('');
+      lines.push(
+        `Utilization is **${p(debt.utilizationPercent)}** of the ${m(debt.creditLimitCents)} limit.${
+          to30 > 0 ? ` Paying ${m(to30)} before the statement closes takes it under 30%.` : ' Already under 30%.'
+        }`,
+      );
+    }
+    lines.push('');
+    lines.push(
+      `Minimum payment is ${m(debt.minimumPaymentCents)}, which covers ${
+        debt.minimumPaymentCents > debt.monthlyInterestCents
+          ? `the interest with ${m(debt.minimumPaymentCents - debt.monthlyInterestCents)} going to principal`
+          : '**less than the interest** — the balance grows if you pay only the minimum'
+      }.`,
+    );
+    return lines.join('\n');
+  }
+
+  if (subject.kind === 'category') {
+    const category = facts.categories.find((c) => c.id === subject.id);
+    if (!category) return null;
+    const lines = [
+      `**${category.name}:** ${m(category.spentCents)} this period — ${p(category.percentOfSpend)} of spend, ${p(category.percentOfIncome)} of income.`,
+      '',
+      `Against last month: ${category.deltaVsLastMonthCents >= 0 ? '+' : ''}${m(category.deltaVsLastMonthCents)}. Six-month average: ${m(category.sixMonthAverageCents)}.`,
+    ];
+    if (category.capCents) {
+      lines.push('');
+      lines.push(
+        `You capped this at ${m(category.capCents)} — currently **${p(category.capPercent ?? 0)}** of it.`,
+      );
+    }
+    if (category.risingThreeMonths) {
+      lines.push('');
+      lines.push('This has risen three months running, so it is a trend rather than one unusual month.');
+    }
+    return lines.join('\n');
+  }
+
+  const goal = facts.goals.find((g) => g.id === subject.id);
+  if (!goal) return null;
+  return [
+    `**${goal.name}:** ${m(goal.savedCents)} of ${m(goal.targetCents)} — ${p(goal.percentFunded)} funded, ${m(goal.remainingCents)} to go.`,
+    '',
+    goal.monthsToFundAtCurrentRate !== null
+      ? `At your current leftover that is about **${goal.monthsToFundAtCurrentRate} ${goal.monthsToFundAtCurrentRate === 1 ? 'month' : 'months'}**.`
+      : 'Your projected leftover is zero, so there is no timeline on it yet.',
+    goal.reserved ? '\nIt is reserved from safe-to-spend, so the unfunded part is already held back.' : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}

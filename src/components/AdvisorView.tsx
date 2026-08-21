@@ -6,9 +6,13 @@ import {
   AGENT_LIST,
   ask,
   buildFacts,
+  emptyMemory,
+  getTerm,
   isConfigured,
+  resolveReferences,
   route,
   type Agent,
+  type ConversationMemory,
   type ToolCallRecord,
 } from '../lib/agents';
 import { loadAdvisorConfig, toClaudeConfig } from '../lib/advisorConfig';
@@ -26,6 +30,8 @@ interface Message {
   refused?: boolean;
   fellBack?: boolean;
   error?: string;
+  /** Set when this answer continued the thread rather than starting fresh. */
+  followUpOf?: string;
 }
 
 /**
@@ -77,6 +83,9 @@ const SUGGESTIONS = [
   'Am I saving enough?',
 ];
 
+/** Offered once a thread exists — each only makes sense in context. */
+const FOLLOW_UPS = ['Why?', 'How much would that save?', 'Is that good?', 'What should I do first?'];
+
 function Chat({ reference }: { reference: string }) {
   const { state } = useStore();
   const config = useMemo(() => loadAdvisorConfig(), []);
@@ -94,6 +103,8 @@ function Chat({ reference }: { reference: string }) {
   const [busy, setBusy] = useState(false);
   const [liveTools, setLiveTools] = useState<ToolCallRecord[]>([]);
   const [pendingAgent, setPendingAgent] = useState<Agent | null>(null);
+  // Carried across turns so "why?" and "what about the Visa?" resolve.
+  const [memory, setMemory] = useState<ConversationMemory>(() => emptyMemory());
   const endRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController>();
 
@@ -109,7 +120,8 @@ function Chat({ reference }: { reference: string }) {
 
     // Redact on the way in, so an identifier never enters the transcript.
     const safe = redactSensitive(trimmed);
-    const routed = route(safe);
+    const resolution = resolveReferences(safe, memory, state);
+    const routed = route(resolution.question, memory.lastAgent, resolution.isFollowUp);
 
     setDraft('');
     setBusy(true);
@@ -135,10 +147,12 @@ function Chat({ reference }: { reference: string }) {
         reference,
         config: claudeConfig,
         history,
+        memory,
         onToolCall: (call) => setLiveTools((current) => [...current, call]),
         signal: controller.signal,
       });
 
+      setMemory(reply.memory);
       setMessages((current) => [
         ...current,
         {
@@ -150,6 +164,7 @@ function Chat({ reference }: { reference: string }) {
           refused: reply.refused,
           fellBack: reply.fellBackToLocal,
           error: reply.error,
+          followUpOf: resolution.isFollowUp ? (resolution.subject?.name ?? 'the previous answer') : undefined,
         },
       ]);
     } finally {
@@ -183,6 +198,9 @@ function Chat({ reference }: { reference: string }) {
                 <div className="agent-tag">
                   <span className="dot" style={{ background: message.agent.color }} aria-hidden="true" />
                   <span>{message.agent.name}</span>
+                  {message.followUpOf && (
+                    <span className="pill">continuing · {message.followUpOf}</span>
+                  )}
                   {message.fellBack && <span className="pill pill--warn">offline answer</span>}
                 </div>
               )}
@@ -218,6 +236,16 @@ function Chat({ reference }: { reference: string }) {
         <div ref={endRef} />
       </div>
 
+      {messages.length > 1 && !busy && (
+        <div className="row row--wrap" style={{ gap: 7, marginTop: 4 }}>
+          {FOLLOW_UPS.map((question) => (
+            <button key={question} type="button" className="chip" onClick={() => void send(question)}>
+              {question}
+            </button>
+          ))}
+        </div>
+      )}
+
       {messages.length <= 1 && !busy && (
         <div className="row row--wrap" style={{ gap: 7, marginTop: 4 }}>
           {SUGGESTIONS.map((question) => (
@@ -225,6 +253,19 @@ function Chat({ reference }: { reference: string }) {
               {question}
             </button>
           ))}
+        </div>
+      )}
+
+      {memory.introducedTerms.length > 0 && !busy && (
+        <div className="thread-state" aria-label="Established in this conversation">
+          <span className="thread-state__label">Covered</span>
+          {memory.entities.slice(0, 2).map((entity) => (
+            <span key={`${entity.kind}-${entity.id}`} className="pill">{entity.name}</span>
+          ))}
+          {memory.introducedTerms.slice(-3).map((id) => {
+            const term = getTerm(id);
+            return term ? <span key={id} className="pill pill--recurring">{term.label}</span> : null;
+          })}
         </div>
       )}
 

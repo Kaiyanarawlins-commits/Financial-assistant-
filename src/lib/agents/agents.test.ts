@@ -19,6 +19,15 @@ import { containsTerm } from './matching';
 import { AGENTS, AGENT_LIST, buildSystemPrompt } from './roster';
 import { executeTool, toolsFor } from './tools';
 import { askLocally } from './index';
+import {
+  emptyMemory,
+  formatMemory,
+  rememberAnswer,
+  rememberQuestion,
+  resolveReferences,
+  withDefinition,
+} from './conversation';
+import { termsIn } from './glossary';
 
 const REFERENCE = '2026-08-15';
 
@@ -471,5 +480,136 @@ describe('roster integrity', () => {
 
   it('keeps the triage agent reachable by id', () => {
     expect(AGENTS.triage.id).toBe('triage');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('conversation memory', () => {
+  const state = demo();
+
+  function thread(...questions: string[]) {
+    let memory = emptyMemory();
+    const replies = [];
+    for (const question of questions) {
+      const reply = askLocally(question, state, REFERENCE, memory);
+      memory = reply.memory;
+      replies.push(reply);
+    }
+    return { replies, memory };
+  }
+
+  it('carries the specialist across a bare follow-up', () => {
+    const { replies } = thread('how do I raise my credit score?', 'why?');
+    expect(replies[0]?.agent.id).toBe('credit');
+    // "why?" alone routes nowhere; without stickiness it would land on triage.
+    expect(replies[1]?.agent.id).toBe('credit');
+  });
+
+  it('answers "why?" against the last recommendation instead of restarting', () => {
+    const { replies } = thread('how do I pay off my debt?', 'why?');
+    const second = replies[1]!.text;
+    expect(second).toMatch(/^Because/);
+    expect(second).not.toBe(replies[0]!.text);
+    expect(second.length).toBeLessThan(replies[0]!.text.length);
+  });
+
+  it('resolves a named entity mentioned in a follow-up', () => {
+    const { replies } = thread('how is my credit?', 'what about the store card?');
+    expect(replies[1]?.text).toMatch(/Store card/);
+    expect(replies[1]?.text).toMatch(/utilization|Utilization/);
+  });
+
+  it('prices "how much would that save?" from the figure last discussed', () => {
+    const { replies } = thread('should I cut my subscriptions?', 'how much would that save?');
+    expect(replies[1]?.text).toMatch(/Annually|savings rate/i);
+    expect(replies[1]?.text).toMatch(/\$[\d,]+\.\d{2}/);
+  });
+
+  it('benchmarks "is that good?" against the standard ratios', () => {
+    const { replies } = thread('what is my savings rate?', 'is that good?');
+    expect(replies[1]?.text).toMatch(/benchmarks/i);
+    expect(replies[1]?.text).toMatch(/20%/);
+  });
+
+  it('records entities and terms as they come up', () => {
+    const { memory } = thread('how do I raise my credit score?');
+    expect(memory.introducedTerms).toContain('utilization');
+    expect(memory.lastAgent).toBe('credit');
+    expect(memory.lastQuestion).toBe('how do I raise my credit score?');
+  });
+
+  it('does not treat a fresh, self-contained question as a follow-up', () => {
+    let memory = emptyMemory();
+    memory = askLocally('how do I raise my credit score?', state, REFERENCE, memory).memory;
+    const resolution = resolveReferences('are my subscriptions worth it?', memory, state);
+    expect(resolution.isFollowUp).toBe(false);
+  });
+
+  it('lets a strongly-matching follow-up move the thread to another specialist', () => {
+    const { replies } = thread(
+      'how do I raise my credit score?',
+      'what about my emergency fund and savings goals?',
+    );
+    expect(replies[1]?.agent.id).toBe('savings');
+  });
+
+  it('expands a follow-up into a self-contained question', () => {
+    let memory = emptyMemory();
+    memory = askLocally('how is my credit utilization?', state, REFERENCE, memory).memory;
+    const resolution = resolveReferences('why?', memory, state);
+    expect(resolution.isFollowUp).toBe(true);
+    expect(resolution.question).toMatch(/following on from/);
+  });
+
+  it('keeps the transcript bounded', () => {
+    let memory = emptyMemory();
+    for (let i = 0; i < 12; i++) {
+      memory = askLocally(`question ${i} about spending`, state, REFERENCE, memory).memory;
+    }
+    expect(memory.turns.length).toBeLessThanOrEqual(12);
+    expect(memory.entities.length).toBeLessThanOrEqual(4);
+  });
+});
+
+describe('accountant register', () => {
+  it('tells the model to define a term once and then use it bare', () => {
+    const prompt = buildSystemPrompt(AGENTS.credit, 'FACTS', false, 'CONVERSATION STATE\n- Terms already explained: credit utilization');
+    expect(prompt).toContain('HOW TO TALK');
+    expect(prompt).toContain('define it once');
+    expect(prompt).toContain('Terms already explained');
+  });
+
+  it('surfaces established context and undefined terms to the model', () => {
+    const state = demo();
+    const facts = buildFacts(state, REFERENCE);
+    let memory = emptyMemory();
+    memory = rememberQuestion(memory, 'how is my credit?', state);
+    memory = rememberAnswer(
+      memory,
+      'Your credit utilization is 70%. Pay $560 to the store card before the statement closes.',
+      'credit',
+      state,
+      facts,
+    );
+
+    const rendered = formatMemory(memory);
+    expect(rendered).toContain('CONVERSATION STATE');
+    expect(rendered).toMatch(/Terms already explained:.*credit utilization/);
+    expect(rendered).toMatch(/Not yet explained/);
+    expect(rendered).toMatch(/last suggestion|last suggestion:/i);
+  });
+
+  it('defines a term on first use and drops the gloss afterwards', () => {
+    let memory = emptyMemory();
+    expect(withDefinition(memory, 'dti')).toMatch(/share of gross monthly income/);
+    memory = { ...memory, introducedTerms: ['dti'] };
+    expect(withDefinition(memory, 'dti')).toBe('debt-to-income ratio ');
+  });
+
+  it('finds glossary terms in prose', () => {
+    expect(termsIn('your debt-to-income ratio is high')).toContain('dti');
+    expect(termsIn('the avalanche method pays less interest')).toContain('avalanche');
+    expect(termsIn('nothing relevant here')).toHaveLength(0);
   });
 });
