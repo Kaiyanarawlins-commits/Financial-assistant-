@@ -9,6 +9,7 @@ import {
   parseYears,
   payoffTime,
   projectGrowth,
+  readSavingsScenario,
   retirementTarget,
   timeToTarget,
 } from './calculators';
@@ -730,5 +731,84 @@ describe('chat history', () => {
     expect(conversation.messages).toHaveLength(0);
     expect(conversation.memory.turns).toHaveLength(0);
     expect(conversation.title).toBe('New conversation');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('income-minus-expenses scenarios', () => {
+  const state = demo();
+  const ask = (q: string) => askLocally(q, state, REFERENCE).text;
+
+  // The reported failure: every figure ignored, answered with the demo data.
+  it('answers the reported question with the user\'s own figures', () => {
+    const reply = ask(
+      'if i make 5k a month and have expenses totalling 1.5k a month how lomg would it take me to save 10k',
+    );
+    expect(reply).toMatch(/3 mo/);
+    expect(reply).toContain('$5,000.00');
+    expect(reply).toContain('$1,500.00');
+    expect(reply).toContain('$3,500.00');
+    expect(reply).toContain('$10,000.00');
+    // Must not quote the stored demo figures.
+    expect(reply).not.toContain('$6,800.00');
+    expect(reply).not.toContain('$2,852.03');
+  });
+
+  it('recognises present-tense conditionals', () => {
+    for (const phrasing of [
+      'if i make 5000 a month',
+      'if i earn 5000 a month',
+      'if i have 5000 a month',
+      'if i save 500 a month',
+      'if i spend 2000 a month',
+      'how long would it take me to save 10k',
+      'how many months to save $5,000',
+    ]) {
+      expect(isHypothetical(phrasing), phrasing).toBe(true);
+    }
+  });
+
+  it('classifies figures by the words around them, not by size', () => {
+    const scenario = readSavingsScenario(
+      'if i make 5k a month and have expenses totalling 1.5k a month how long to save 10k',
+    );
+    expect(scenario.monthlyIncomeCents).toBe(500_000);
+    expect(scenario.monthlyExpensesCents).toBe(150_000);
+    expect(scenario.targetCents).toBe(1_000_000);
+    expect(scenario.monthlyContributionCents).toBe(350_000);
+    expect(scenario.derivedFromSurplus).toBe(true);
+  });
+
+  it('prefers a stated monthly contribution over the derived surplus', () => {
+    const scenario = readSavingsScenario('i make 5k a month but can only save 800 a month toward 10k');
+    expect(scenario.monthlyContributionCents).toBe(80_000);
+    expect(scenario.derivedFromSurplus).toBe(false);
+  });
+
+  it('converts an annual salary to a monthly figure', () => {
+    const scenario = readSavingsScenario('if i earn $60,000 a year and spend 2k a month, how long to save 10k');
+    expect(scenario.monthlyIncomeCents).toBe(500_000);
+    expect(scenario.monthlyContributionCents).toBe(300_000);
+  });
+
+  it('says a target is unreachable when expenses swallow income', () => {
+    const reply = ask('if i make 2k a month and have expenses of 2k a month how long to save 10k');
+    expect(reply).toMatch(/not reachable/i);
+    expect(reply).not.toContain('$6,800.00');
+  });
+
+  it('shows the month-by-month build so the date can be checked', () => {
+    const reply = ask('if i make 5k a month and spend 1.5k a month how long to save 10k');
+    expect(reply).toContain('End of month 1: $3,500.00');
+    expect(reply).toContain('End of month 3: $10,500.00');
+  });
+
+  it('never answers a figure-bearing scenario with stored data', () => {
+    // A scenario shape the offline calculators do not cover.
+    const reply = ask('what if i inherited $250,000 and my brother took half of it, hypothetically');
+    expect(reply).not.toContain('$6,800.00');
+    expect(reply).not.toMatch(/keeping \*\*\d+%\*\* of your income/);
+    expect(reply).toMatch(/not the numbers you asked about|figures you gave me/i);
   });
 });

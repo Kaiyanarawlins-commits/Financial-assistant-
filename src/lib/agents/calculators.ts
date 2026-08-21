@@ -212,6 +212,15 @@ export interface ParsedFigure {
   /** True when the text marked it as a yearly figure ("$80k a year"). */
   annual: boolean;
   raw: string;
+  /**
+   * Where the match started.
+   *
+   * Load-bearing: two figures in one sentence are often written identically
+   * ("make 2k a month, spend 2k a month"), and looking the raw text up with
+   * `indexOf` returned the first position for both — so the second figure
+   * inherited the first one's context and both were read as income.
+   */
+  index: number;
 }
 
 /**
@@ -241,7 +250,12 @@ export function parseFigures(text: string): ParsedFigure[] {
     const after = text.slice((match.index ?? 0) + raw.length, (match.index ?? 0) + raw.length + 24).toLowerCase();
     const annual = /\b(a|per|each)\s*(year|yr|annum)|\bannual|\byearly|\bsalary/.test(after);
 
-    out.push({ cents: Math.round(base * scale * 100), annual, raw: raw.trim() });
+    out.push({
+      cents: Math.round(base * scale * 100),
+      annual,
+      raw: raw.trim(),
+      index: match.index ?? 0,
+    });
   }
   return out;
 }
@@ -273,7 +287,156 @@ export function parseYears(text: string): number | null {
  * which numbers are supposed and which are real.
  */
 export function isHypothetical(text: string): boolean {
-  return /\b(what if|if i (were|was|had|made|earned|got|won|saved|invested|could)|suppose|supposing|hypothetical(ly)?|let'?s say|say i|imagine|assuming|pretend|in theory|theoretically|would i be able|could i afford|how much (house|home|car|rent) can i)\b/i.test(
-    text,
-  );
+  return SCENARIO_CUES.some((cue) => cue.test(text));
+}
+
+/**
+ * Scenario framings.
+ *
+ * Split into named patterns because the original single regex listed verbs in
+ * the past tense only — "if i made" was covered and "if i make" was not, so
+ * "if i make 5k a month, how long to save 10k?" was never recognised as a
+ * scenario at all and fell through to a canned summary of the user's *stored*
+ * data. Present tense is how people actually phrase a standing situation.
+ */
+const SCENARIO_CUES: RegExp[] = [
+  /\bwhat if\b/i,
+  /\bif i\s+(?:were|was|had|have|make|makes|made|earn|earned|get|got|win|won|save|saved|spend|spent|invest|invested|put|could|can|only)\b/i,
+  /\bif my\b/i,
+  /\b(?:suppose|supposing|assuming|imagine|pretend|hypothetical|hypothetically|in theory|theoretically)\b/i,
+  /\b(?:let'?s say|say i|say my)\b/i,
+  /\bwould i be able\b/i,
+  /\bcould i (?:afford|save|pay|buy|retire)\b/i,
+  /\bhow much (?:house|home|car|rent) can i\b/i,
+  // "how long would it take me to save 10k" is a scenario even with no "if".
+  /\bhow long (?:would|will|does|do|is it going to)\b/i,
+  /\bhow (?:long|many months|many years)\b.{0,40}\b(?:take|reach|save|pay off|clear)\b/i,
+];
+
+// ---------------------------------------------------------------------------
+// Figure roles
+// ---------------------------------------------------------------------------
+
+export type FigureRole = 'income' | 'expenses' | 'target' | 'contribution' | 'balance' | 'payment' | 'unknown';
+
+export type Cadence = 'monthly' | 'annual' | 'once';
+
+export interface LabelledFigure extends ParsedFigure {
+  role: FigureRole;
+  cadence: Cadence;
+}
+
+const ROLE_CUES: { role: Exclude<FigureRole, 'unknown' | 'target' | 'contribution'>; pattern: RegExp }[] = [
+  {
+    role: 'income',
+    pattern: /\b(make|makes|making|earn|earns|earning|salary|income|wage|paid|pay ?check|take[- ]home|bring in|gross|net pay)\b/i,
+  },
+  {
+    role: 'expenses',
+    pattern: /\b(expense|expenses|spend|spends|spending|bills?|costs?|outgoings?|overheads?|rent|totalling|totaling|budget)\b/i,
+  },
+  { role: 'balance', pattern: /\b(balance|owe|owing|debt|card|loan|mortgage|principal)\b/i },
+  { role: 'payment', pattern: /\b(pay|paying|payment|repay|put toward|towards|contribute)\b/i },
+];
+
+const SAVE_CUE = /\b(save|saves|saving|savings|set aside|put away|stash|target|goal|reach|accumulate|need|want)\b/i;
+
+/**
+ * Assigns each figure a role from the words around it.
+ *
+ * Position, not magnitude. The previous code guessed by size — smallest figure
+ * is the monthly amount, largest is the target — which happens to be right for
+ * "save 10k at 500 a month" and badly wrong for "make 5k, spend 1.5k, save
+ * 10k", where the smallest number is the user's *expenses*. Guessing produced
+ * confident, wrong arithmetic; reading the sentence does not.
+ */
+export function classifyFigures(text: string): LabelledFigure[] {
+  const figures = parseFigures(text);
+  if (figures.length === 0) return [];
+
+  return figures.map((figure, position) => {
+    const index = figure.index;
+    const previous = position > 0 ? figures[position - 1] : undefined;
+    // Start after the previous figure so a verb cannot be claimed twice.
+    const windowStart = previous ? previous.index + previous.raw.length : Math.max(0, index - 46);
+    const before = text.slice(Math.max(windowStart, index - 46), index);
+
+    // Stop at the next figure, so "$60,000 a year and spend 2k a month" does not
+    // read the *following* clause's cadence back onto the salary.
+    const next = figures[position + 1];
+    const afterEnd = Math.min(
+      next ? next.index : text.length,
+      index + figure.raw.length + 30,
+    );
+    const after = text.slice(index + figure.raw.length, Math.max(index + figure.raw.length, afterEnd));
+
+    const cadence: Cadence = /\b(a|per|each|every)\s*(month|mo|week|fortnight)\b|\bmonthly\b|\/\s*mo\b/i.test(after)
+      ? 'monthly'
+      : figure.annual || /\b(a|per|each)\s*(year|yr)\b|\bannually\b|\byearly\b/i.test(after)
+        ? 'annual'
+        : 'once';
+
+    // The nearest preceding cue wins, so each figure takes the verb that
+    // governs it rather than any cue anywhere in the sentence.
+    let role: FigureRole = 'unknown';
+    let bestPosition = -1;
+    for (const { role: candidate, pattern } of ROLE_CUES) {
+      const match = before.match(new RegExp(`(?:.*)(${pattern.source})`, 'i'));
+      if (match && match.index !== undefined) {
+        const position = before.lastIndexOf(match[1] ?? '');
+        if (position > bestPosition) {
+          bestPosition = position;
+          role = candidate;
+        }
+      }
+    }
+
+    // A saving cue outranks the others, and its cadence decides which kind:
+    // "save $500 a month" is a contribution, "save $10k" is a target.
+    const savePosition = (() => {
+      const match = before.match(new RegExp(`(?:.*)(${SAVE_CUE.source})`, 'i'));
+      return match?.[1] ? before.lastIndexOf(match[1]) : -1;
+    })();
+    if (savePosition > bestPosition) {
+      role = cadence === 'monthly' ? 'contribution' : 'target';
+    }
+
+    return { ...figure, role, cadence };
+  });
+}
+
+export interface SavingsScenario {
+  targetCents: number | null;
+  monthlyIncomeCents: number | null;
+  monthlyExpensesCents: number | null;
+  /** What is actually available to save each month. */
+  monthlyContributionCents: number | null;
+  /** True when the contribution came from income − expenses rather than being stated. */
+  derivedFromSurplus: boolean;
+}
+
+/** Reads "make 5k a month, spend 1.5k, save 10k" into something answerable. */
+export function readSavingsScenario(text: string): SavingsScenario {
+  const figures = classifyFigures(text);
+  const monthly = (figure: LabelledFigure | undefined) =>
+    figure ? (figure.cadence === 'annual' ? Math.round(figure.cents / 12) : figure.cents) : null;
+
+  const income = monthly(figures.find((f) => f.role === 'income'));
+  const expenses = monthly(figures.find((f) => f.role === 'expenses'));
+  const stated = monthly(figures.find((f) => f.role === 'contribution'));
+  const target =
+    figures.find((f) => f.role === 'target')?.cents ??
+    // An unlabelled one-off figure in a savings question is the target.
+    figures.find((f) => f.role === 'unknown' && f.cadence === 'once')?.cents ??
+    null;
+
+  const surplus = income !== null && expenses !== null ? income - expenses : null;
+
+  return {
+    targetCents: target,
+    monthlyIncomeCents: income,
+    monthlyExpensesCents: expenses,
+    monthlyContributionCents: stated ?? surplus,
+    derivedFromSurplus: stated === null && surplus !== null,
+  };
 }

@@ -6,11 +6,13 @@ import { formatMonths } from '../debt';
 import {
   affordability,
   isHypothetical,
+  classifyFigures,
   parseFigures,
   parseRates,
   parseYears,
   payoffTime,
   projectGrowth,
+  readSavingsScenario,
   retirementTarget,
   timeToTarget,
 } from './calculators';
@@ -178,6 +180,16 @@ function answerLocally(
   if (isHypothetical(question)) {
     const scenario = answerHypothetically(question, facts);
     if (scenario) return scenario;
+
+    // The question is a scenario carrying the user's own figures, and nothing
+    // here could price it. Falling through to the specialist would answer with
+    // the *stored* data instead — which is how "if I make 5k and spend 1.5k"
+    // came back quoting a $6,800 income the user never mentioned. Saying what
+    // was understood is worth far more than a confident answer to a different
+    // question.
+    if (parseFigures(question).length > 0) {
+      return unpricedScenario(question);
+    }
   }
 
   // A follow-up gets a follow-up answer. Re-running the specialist's opening
@@ -289,21 +301,58 @@ function answerHypothetically(question: string, facts: AdvisorFacts): string | n
     (containsAny(q, ['save', 'saving', 'reach', 'target', 'goal', 'set aside']) || /how long/i.test(q)) &&
     figures.length >= 1
   ) {
-    const target = largest.cents;
-    const monthly = figures.length > 1 ? smallest.cents : Math.max(0, facts.cashflow.remainingBalanceCents);
+    // Read the roles out of the sentence rather than guessing from magnitudes.
+    const scenario = readSavingsScenario(question);
+    const target = scenario.targetCents ?? largest.cents;
+    const monthly =
+      scenario.monthlyContributionCents ?? Math.max(0, facts.cashflow.remainingBalanceCents);
     const rate = rates[0] ?? 0;
-    const result = timeToTarget(target, monthly, 0, rate);
 
-    if (result.neverReaches) {
-      return `At ${m(monthly)} a month you would not reach ${m(target)} — the monthly amount is zero or negative. Tell me an amount you could set aside and I will give you the date.`;
+    if (monthly <= 0) {
+      return [
+        scenario.monthlyIncomeCents !== null && scenario.monthlyExpensesCents !== null
+          ? `On ${m(scenario.monthlyIncomeCents)} a month against ${m(scenario.monthlyExpensesCents)} of expenses there is nothing left over, so **${m(target)} is not reachable** without changing one of those two figures.`
+          : `At ${m(monthly)} a month you would never reach ${m(target)}. Tell me what you could set aside and I will give you the date.`,
+      ].join('\n');
     }
-    return [
-      `Saving **${m(monthly)} a month**${rate > 0 ? ` at ${rate}%` : ''}, you would reach **${m(target)}** in **${formatMonths(result.months)}**.`,
-      '',
-      monthly === Math.max(0, facts.cashflow.remainingBalanceCents)
-        ? `That uses your actual projected leftover of ${m(monthly)}/mo. If you can push it higher, the timeline moves fast: at ${m(Math.round(monthly * 1.5))}/mo it becomes ${formatMonths(timeToTarget(target, Math.round(monthly * 1.5), 0, rate).months)}.`
-        : `For contrast, your current projected leftover is ${m(Math.max(0, facts.cashflow.remainingBalanceCents))}/mo.`,
-    ].join('\n');
+
+    const result = timeToTarget(target, monthly, 0, rate);
+    const lines: string[] = [];
+
+    if (scenario.derivedFromSurplus && scenario.monthlyIncomeCents !== null) {
+      lines.push(
+        `**About ${formatMonths(result.months)}.**`,
+        '',
+        `${m(scenario.monthlyIncomeCents)} in, ${m(scenario.monthlyExpensesCents ?? 0)} out leaves **${m(monthly)} a month**. ${m(target)} ÷ ${m(monthly)} = ${(target / monthly).toFixed(2)} months.`,
+      );
+    } else {
+      lines.push(
+        `Saving **${m(monthly)} a month**${rate > 0 ? ` at ${rate}%` : ''}, you would reach **${m(target)}** in **${formatMonths(result.months)}**.`,
+      );
+    }
+
+    // The month-by-month table, so the date can be checked rather than trusted.
+    lines.push('');
+    for (let month = 1; month <= Math.min(result.months, 6); month++) {
+      lines.push(`- End of month ${month}: ${m(monthly * month)}`);
+    }
+    if (result.months > 6) lines.push(`- …reaching ${m(target)} in month ${result.months}`);
+
+    if (scenario.derivedFromSurplus) {
+      lines.push('');
+      lines.push(
+        `Two things would move that date. **Is the ${m(scenario.monthlyIncomeCents ?? 0)} take-home or gross?** If it is gross, tax comes out first and the surplus is meaningfully smaller. And **does the ${m(scenario.monthlyExpensesCents ?? 0)} include the irregular costs** — annual insurance, car maintenance, gifts? Those are the ones people leave out, and they usually add 10–20%.`,
+      );
+    }
+
+    if (rate === 0 && target >= 500_000) {
+      lines.push('');
+      lines.push(
+        `Interest is a rounding error at this horizon — ${m(target)} in a 4% account earns roughly ${m(Math.round((target * 0.04 * result.months) / 12))} over ${formatMonths(result.months)}, which does not change the answer.`,
+      );
+    }
+
+    return lines.join('\n');
   }
 
   // --- Debt payoff at a hypothetical payment --------------------------------
@@ -359,6 +408,31 @@ function answerHypothetically(question: string, facts: AdvisorFacts): string | n
 }
 
 export { AGENTS };
+
+/**
+ * What to say when a scenario cannot be priced offline.
+ *
+ * Names the figures it read back, so the user can see whether it understood
+ * them, and points at the path that can answer anything.
+ */
+function unpricedScenario(question: string): string {
+  const figures = classifyFigures(question);
+  const described = figures
+    .map((f) => {
+      const cadence = f.cadence === 'monthly' ? '/month' : f.cadence === 'annual' ? '/year' : '';
+      const role = f.role === 'unknown' ? '' : ` — read as ${f.role}`;
+      return `- ${m(f.cents)}${cadence}${role}`;
+    })
+    .join('\n');
+
+  return `I can see the figures you gave me, but not what to do with them in this shape:
+
+${described}
+
+I will not answer with your stored data instead — those are not the numbers you asked about.
+
+Tell me what you want worked out and I can price it exactly: how long to reach a savings target, what a loan payment would be, how long a balance takes to clear, what an investment would grow to, or what housing a salary supports. Connecting Claude in **Settings → AI advisor** removes this limit entirely — it can reason about any scenario rather than the handful I calculate offline.`;
+}
 
 // ---------------------------------------------------------------------------
 // Follow-up answers
