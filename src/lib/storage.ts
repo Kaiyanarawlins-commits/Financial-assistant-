@@ -4,6 +4,24 @@ import { DEFAULT_CATEGORIES } from './categories';
 const STORAGE_KEY = 'cashcompass.state.v1';
 export const SCHEMA_VERSION = 1;
 
+/**
+ * Whose ledger is loaded.
+ *
+ * Set at sign-in. Two people sharing a laptop must not see each other's
+ * finances, and signing out has to leave nothing behind on screen — namespacing
+ * the key is what makes both true. Empty means the pre-account single-user
+ * store, which is also what an existing install upgrades from.
+ */
+let namespace = '';
+
+export function setStorageNamespace(userId: string): void {
+  namespace = userId ? `.${userId}` : '';
+}
+
+function storageKey(): string {
+  return `${STORAGE_KEY}${namespace}`;
+}
+
 export function emptyState(): AppState {
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -35,7 +53,7 @@ export function emptyState(): AppState {
 export function loadState(): AppState | null {
   if (typeof localStorage === 'undefined') return null;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey());
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<AppState>;
     const base = emptyState();
@@ -56,7 +74,7 @@ export function loadState(): AppState | null {
 export function saveState(state: AppState): void {
   if (typeof localStorage === 'undefined') return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(storageKey(), JSON.stringify(state));
   } catch {
     // Quota exceeded or private-browsing restrictions. The in-memory state is
     // still correct, so the session keeps working; only persistence is lost.
@@ -65,7 +83,7 @@ export function saveState(state: AppState): void {
 
 export function clearState(): void {
   if (typeof localStorage === 'undefined') return;
-  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(storageKey());
 }
 
 /** Full state as a JSON backup the user can download. */

@@ -32,6 +32,7 @@ import {
   type ConversationMemory,
   type Entity,
 } from './conversation';
+import { makeConversational } from './conversational';
 import { screenQuestion } from './guardrails';
 import { route } from './router';
 import { containsAny } from './matching';
@@ -43,6 +44,7 @@ export * from './facts';
 export * from './router';
 export * from './guardrails';
 export * from './conversation';
+export * from './conversational';
 export * from './glossary';
 export { isConfigured, describeError } from './claude';
 export type { AgentReply, ClaudeConfig, ModelId, ToolCallRecord } from './claude';
@@ -203,10 +205,10 @@ function answerLocally(
   // it is not listening.
   if (isFollowUp) {
     const followUp = answerFollowUp(question, facts, state, memory, subject);
-    if (followUp) return followUp;
+    if (followUp) return makeConversational(followUp, memory, agent.id, true);
   }
 
-  return agent.localAnswer(facts, state, question);
+  return makeConversational(agent.localAnswer(facts, state, question), memory, agent.id, isFollowUp);
 }
 
 // ---------------------------------------------------------------------------

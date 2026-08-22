@@ -33,6 +33,8 @@ import { termsIn } from './glossary';
 import { cautionFor, correctionPrompt, extractFigures, verifyAnswer } from './verify';
 import { formatMoney } from '../money';
 import { newConversation, titleFrom } from '../chatHistory';
+import { acknowledgement, trimRepetition } from './conversational';
+import { checkPassword, isValidEmail, normaliseEmail } from '../auth/crypto';
 
 const REFERENCE = '2026-08-15';
 
@@ -514,7 +516,9 @@ describe('conversation memory', () => {
   it('answers "why?" against the last recommendation instead of restarting', () => {
     const { replies } = thread('how do I pay off my debt?', 'why?');
     const second = replies[1]!.text;
-    expect(second).toMatch(/^Because/);
+    // The conversational layer prefixes an acknowledgement, so "Because" is no
+    // longer the first word — but it must still be the first thing it *says*.
+    expect(second).toMatch(/Because of the arithmetic/);
     expect(second).not.toBe(replies[0]!.text);
     expect(second.length).toBeLessThan(replies[0]!.text.length);
   });
@@ -929,5 +933,111 @@ describe('scenario refinement across turns', () => {
   it('keeps blank lines between sections so the answer is readable', () => {
     const { replies } = thread(OPENING, 'this is gross');
     expect(replies[1]).toContain('\n\n');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('conversational layer', () => {
+  const state = demo();
+
+  function thread(...questions: string[]) {
+    let memory = emptyMemory();
+    const replies: string[] = [];
+    for (const question of questions) {
+      const reply = askLocally(question, state, REFERENCE, memory);
+      memory = reply.memory;
+      replies.push(reply.text);
+    }
+    return { replies, memory };
+  }
+
+  it('does not repeat a paragraph it has already delivered', () => {
+    const { replies } = thread('how do I raise my credit score?', 'how do I raise my credit score?');
+    expect(replies[1]!.length).toBeLessThan(replies[0]!.length / 2);
+  });
+
+  it('keeps the figures when trimming repetition', () => {
+    const { replies } = thread('how do I raise my credit score?', 'how do I raise my credit score?');
+    // Prose goes; the numbers that answer the question stay.
+    expect(replies[1]).toMatch(/\$[\d,]+\.\d{2}|\d+%/);
+  });
+
+  it('acknowledges the turn it is continuing', () => {
+    const { replies } = thread('how do I raise my credit score?', 'what about the store card?');
+    expect(replies[1]).toMatch(/^(On|Staying with|For|Following on|Picking that up)/);
+  });
+
+  it('does not add an acknowledgement to a fresh question', () => {
+    const { replies } = thread('how do I raise my credit score?');
+    expect(replies[0]).not.toMatch(/^(On|Staying with|Following on)/);
+  });
+
+  it('never returns an empty reply when everything was already said', () => {
+    const { replies } = thread(
+      'are my subscriptions worth it?',
+      'are my subscriptions worth it?',
+      'are my subscriptions worth it?',
+    );
+    for (const reply of replies) expect(reply.trim().length).toBeGreaterThan(40);
+  });
+
+  it('leaves bullets and short lines alone', () => {
+    const trimmedOutput = trimRepetition(
+      '- $920.00 on the store card\n\nShort line.',
+      { ...emptyMemory(), turns: [{ role: 'advisor', text: '- $920.00 on the store card\n\nShort line.' }] },
+    );
+    expect(trimmedOutput.text).toContain('$920.00');
+    expect(trimmedOutput.removed).toBe(0);
+  });
+
+  it('varies the acknowledgement across turns rather than repeating one', () => {
+    const base = { ...emptyMemory(), entities: [{ kind: 'debt' as const, id: 'd', name: 'Visa' }] };
+    const first = acknowledgement({ ...base, turns: [{ role: 'advisor', text: 'a' }] }, true);
+    const second = acknowledgement(
+      { ...base, turns: [{ role: 'advisor', text: 'a' }, { role: 'advisor', text: 'b' }] },
+      true,
+    );
+    expect(first).not.toBe(second);
+  });
+
+  it('offers a next step only intermittently', () => {
+    const { replies } = thread(
+      'how do I raise my credit score?',
+      'what about the store card?',
+      'why?',
+      'is that good?',
+    );
+    const withNextStep = replies.filter((reply) => /\*[A-Z][^*]+\*$/m.test(reply.trim()));
+    // Present, but not on every single turn.
+    expect(withNextStep.length).toBeGreaterThan(0);
+    expect(withNextStep.length).toBeLessThan(replies.length);
+  });
+});
+
+describe('auth validation', () => {
+  it('accepts ordinary addresses and rejects obvious rubbish', () => {
+    expect(isValidEmail('alex@example.com')).toBe(true);
+    expect(isValidEmail('a.b+tag@sub.example.co.uk')).toBe(true);
+    expect(isValidEmail('not-an-email')).toBe(false);
+    expect(isValidEmail('missing@domain')).toBe(false);
+    expect(isValidEmail('')).toBe(false);
+  });
+
+  it('requires length over character classes', () => {
+    expect(checkPassword('short').ok).toBe(false);
+    expect(checkPassword('P@ss1').ok).toBe(false);
+    // A long passphrase with no symbols is fine; that is the point.
+    expect(checkPassword('correct horse battery staple').ok).toBe(true);
+    expect(checkPassword('correct horse battery staple').score).toBeGreaterThanOrEqual(3);
+  });
+
+  it('rejects passwords a cracking list already has', () => {
+    expect(checkPassword('password123456').ok).toBe(false);
+    expect(checkPassword('aaaaaaaaaaaaaa').ok).toBe(false);
+  });
+
+  it('normalises email for lookup', () => {
+    expect(normaliseEmail('  Alex@Example.COM ')).toBe('alex@example.com');
   });
 });

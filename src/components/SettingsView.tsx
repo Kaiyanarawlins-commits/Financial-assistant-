@@ -11,6 +11,7 @@ import {
 } from '../lib/exporter';
 import { formatMoney, toCents, toDollars } from '../lib/money';
 import { deserializeState, serializeState } from '../lib/storage';
+import { getAuthProvider, getAuthServerUrl, setAuthServerUrl, type Session } from '../lib/auth';
 import {
   MODEL_OPTIONS,
   defaultAdvisorConfig,
@@ -20,8 +21,16 @@ import {
 } from '../lib/advisorConfig';
 import { AlertIcon, Card, Field, InfoIcon, PlusIcon, Segmented, Sheet, Toggle } from './ui';
 
-/** Settings: modes, categories and caps, data export and reset. */
-export function SettingsView({ reference }: { reference: string }) {
+/** Settings: account, modes, categories and caps, data export and reset. */
+export function SettingsView({
+  reference,
+  session,
+  onSignOut,
+}: {
+  reference: string;
+  session: Session;
+  onSignOut: () => void;
+}) {
   const { state, dispatch } = useStore();
   const [editingCategory, setEditingCategory] = useState<string | null>(null);
   const [addingCategory, setAddingCategory] = useState(false);
@@ -38,6 +47,8 @@ export function SettingsView({ reference }: { reference: string }) {
 
   return (
     <div className="stack">
+      <AccountCard session={session} onSignOut={onSignOut} />
+
       <Card title="Appearance">
         <div className="row row--between row--wrap" style={{ gap: 10 }}>
           <span className="grow small muted" style={{ minWidth: 160 }}>
@@ -558,5 +569,89 @@ function CategorySheet({
         )}
       </div>
     </Sheet>
+  );
+}
+
+/** Who is signed in, how to change the display name, and where auth runs. */
+function AccountCard({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
+  const provider = getAuthProvider();
+  const [name, setName] = useState(session.account.name);
+  const [serverUrl, setServerUrl] = useState(getAuthServerUrl());
+  const [saved, setSaved] = useState(false);
+
+  return (
+    <Card title="Account">
+      <div className="row" style={{ gap: 12, marginBottom: 14 }}>
+        <span className="account__avatar account__avatar--lg" aria-hidden="true">
+          {session.account.name
+            .split(/\s+/)
+            .slice(0, 2)
+            .map((part) => part[0]?.toUpperCase() ?? '')
+            .join('') || '?'}
+        </span>
+        <span className="grow">
+          <div style={{ fontWeight: 700 }}>{session.account.name}</div>
+          <div className="tiny faint">{session.account.email}</div>
+          <div className="tiny" style={{ marginTop: 3 }}>
+            {session.account.emailVerified ? (
+              <span className="pill pill--good">Email verified</span>
+            ) : (
+              <span className="pill pill--warn">Email not verified</span>
+            )}
+          </div>
+        </span>
+      </div>
+
+      <Field label="Display name" hint="Shown on your dashboard.">
+        <div className="row" style={{ gap: 8 }}>
+          <input
+            className="input grow"
+            value={name}
+            onChange={(event) => {
+              setName(event.target.value);
+              setSaved(false);
+            }}
+          />
+          <button
+            type="button"
+            className="btn btn--sm"
+            disabled={!name.trim() || name === session.account.name}
+            onClick={() => {
+              void provider
+                .updateName(session.token, name)
+                .then(() => setSaved(true))
+                .catch(() => setSaved(false));
+            }}
+          >
+            {saved ? 'Saved' : 'Save'}
+          </button>
+        </div>
+      </Field>
+
+      <div style={{ marginTop: 12 }}>
+        <Field
+          label="Auth server"
+          hint="Leave blank to keep accounts in this browser. Point it at server/auth.mjs for real accounts and emailed verification codes."
+        >
+          <input
+            className="input"
+            placeholder="https://your-server.example.com"
+            value={serverUrl}
+            onChange={(event) => setServerUrl(event.target.value)}
+            onBlur={() => setAuthServerUrl(serverUrl)}
+          />
+        </Field>
+      </div>
+
+      <p className="tiny faint" style={{ marginTop: 10 }}>
+        {provider.mode === 'local'
+          ? 'Accounts are stored in this browser. Passwords are hashed with PBKDF2, but client-side auth is not a security boundary — it separates your data and personalises the app.'
+          : 'Signing in against your server. Passwords are verified server-side and verification codes are emailed.'}
+      </p>
+
+      <button type="button" className="btn btn--danger btn--sm" style={{ marginTop: 12 }} onClick={onSignOut}>
+        Sign out
+      </button>
+    </Card>
   );
 }

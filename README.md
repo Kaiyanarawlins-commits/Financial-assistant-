@@ -8,13 +8,15 @@ The name is the thesis: a compass gives direction, and this app's job is to show
 ```bash
 npm install
 npm run dev               # http://localhost:5173
-npm test                  # 176 tests over the engine, agents and guardrails
+npm test                  # 207 tests over the engine, agents, guardrails and auth
 npm run build             # typecheck + production bundle
 npm run build:standalone  # everything inlined into one portable HTML file
 ```
 
-No backend, no accounts, no network calls. Everything lives in `localStorage`, and the first run seeds demo data so
-the dashboard has something to show.
+Your financial data never leaves the device — it lives in `localStorage`, and the first run seeds demo data so the
+dashboard has something to show. Two optional Node servers sit alongside it: `server/auth.mjs` for real accounts
+and emailed verification codes, and `server/proxy.mjs` to keep an Anthropic key off the client. Neither is required
+to run the app.
 
 ### Single-file build
 
@@ -141,9 +143,15 @@ src/
       glossary.ts       Stateful terminology — defined once, then used bare
       matching.ts       Word-boundary keyword matching
       claude.ts         Claude-backed path (Fable 5) with the tool loop
+      conversational.ts Repetition trimming, acknowledgements, next steps
+    auth/
+      crypto.ts         PBKDF2 hashing, CSPRNG codes, password rules
+      localProvider.ts  Accounts in this browser (no server)
+      serverProvider.ts Accounts on server/auth.mjs (real auth)
   state/store.tsx       Reducer + context
   components/           Dashboard, charts, forms, advisor, settings, motion
-server/proxy.mjs        Keeps the API key off the client
+server/proxy.mjs        Keeps the Anthropic key off the client
+server/auth.mjs         Real accounts, hashed passwords, emailed codes
 ```
 
 Three decisions shaped the rest:
@@ -307,6 +315,40 @@ where the choice is made.
 
 ---
 
+## Accounts
+
+Sign up with a name, email and password; verify with a six-digit code; land on a dashboard that greets you by name.
+Each account gets its own namespaced ledger and chat history, so two people on one device never see each other's
+figures.
+
+**Sending email needs a server, and passwords hashed in a browser are not authentication** — anything the client
+computes, the client controls. So auth is built against one interface with two implementations, and the UI says
+which is running rather than implying more security than exists.
+
+**Local mode** (default, no setup): accounts live in this browser. Passwords are hashed with PBKDF2-SHA256 at
+210,000 iterations with a per-account salt — not a security boundary, but a shared laptop or an exported backup
+does not hand over a credential that is probably reused on a real bank. The verification code is shown on screen in
+a panel that says plainly there is no mail server.
+
+**Server mode**: point `VITE_AUTH_SERVER` (or Settings → Account) at `server/auth.mjs`. Passwords are hashed and
+compared server-side, the code is emailed and never returned to the client, and sessions are issued somewhere the
+user cannot reach.
+
+```bash
+RESEND_API_KEY=re_… MAIL_FROM="CashCompass <no-reply@you.com>" \
+ALLOWED_ORIGINS=https://your-app.example.com \
+node server/auth.mjs
+```
+
+Resend, Postmark and SendGrid are all supported over plain HTTPS, so the server has no dependencies — a mail library
+is a lot of supply chain for one POST. With no key set it prints codes to the log and says so at startup.
+
+It also rate-limits per IP, returns the same response whether or not an address is registered (so it cannot be used
+to enumerate accounts), caps code attempts at five, and stores the accounts file at mode 0600. Storage is a JSON
+file, which is honest about what this is: swap `loadDb`/`saveDb` for a real database before it has real users.
+
+---
+
 ## Appearance and motion
 
 **Theme** follows your device by default and can be forced to Light or Dark in Settings. Three states, not two: an
@@ -356,16 +398,18 @@ The last two are honest gaps rather than oversights: both require infrastructure
 
 ## Testing
 
-176 tests, all against the pure modules:
+207 tests, all against the pure modules:
 
 ```
 finance.test.ts   45  balance maths, recurring expansion, idempotency, month-length
                       clamping, leap years, safe-to-spend, buffer mode, cash-on-hand
                       anchoring, income schedules, irregular income, categories,
                       trends, reminders
-agents.test.ts    96  facts, routing, calculators, figure parsing, guardrails,
+agents.test.ts   127  facts, routing, calculators, figure parsing, guardrails,
                       tool execution, specialist answers, hypotheticals,
-                      conversation memory, numeric verification, chat history
+                      conversation memory, scenario refinement, numeric
+                      verification, chat history, the conversational layer,
+                      password and email validation
 advisor.test.ts   26  redaction, guardrails, topic matching, insights
 debt.test.ts       9  payoff simulation, strategy comparison, unpayable plans
 ```

@@ -1,5 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { StoreProvider, useStore } from './state/store';
+import { AuthScreen } from './components/AuthScreen';
+import {
+  getAuthProvider,
+  readSessionToken,
+  rememberSessionToken,
+  type Session,
+} from './lib/auth';
+import { setStorageNamespace } from './lib/storage';
+import { setChatNamespace } from './lib/chatHistory';
 import { today } from './lib/dates';
 import { pendingConfirmations, upcomingBills } from './lib/finance';
 import { Dashboard } from './components/Dashboard';
@@ -28,15 +37,75 @@ const TABS: { id: Tab; label: string; icon: () => JSX.Element }[] = [
   { id: 'settings', label: 'Settings', icon: GearIcon },
 ];
 
+/**
+ * Auth gate.
+ *
+ * The store mounts only once a session exists, and it is keyed on the account
+ * id — that forces a full remount on sign-in, so the reducer initialises from
+ * the right namespace instead of carrying the previous user's ledger into a new
+ * session.
+ */
 export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [checking, setChecking] = useState(true);
+
+  const adopt = useCallback((next: Session | null) => {
+    setStorageNamespace(next?.account.id ?? '');
+    setChatNamespace(next?.account.id ?? '');
+    rememberSessionToken(next?.token ?? null);
+    setSession(next);
+  }, []);
+
+  // Restore a saved session before the first paint decision, so a returning
+  // user does not see the sign-in screen flash before their dashboard.
+  useEffect(() => {
+    const token = readSessionToken();
+    if (!token) {
+      setChecking(false);
+      return;
+    }
+    let cancelled = false;
+    void getAuthProvider()
+      .restore(token)
+      .then((restored) => {
+        if (cancelled) return;
+        adopt(restored);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [adopt]);
+
+  if (checking) {
+    return (
+      <div className="auth">
+        <div className="auth__panel auth__panel--quiet">
+          <CompassIcon size={34} />
+          <span className="small faint">Signing you in…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!session) return <AuthScreen onAuthenticated={adopt} />;
+
   return (
-    <StoreProvider>
-      <Shell />
+    <StoreProvider key={session.account.id}>
+      <Shell session={session} onSignOut={() => void signOutOf(session, adopt)} />
     </StoreProvider>
   );
 }
 
-function Shell() {
+async function signOutOf(session: Session, adopt: (next: Session | null) => void): Promise<void> {
+  await getAuthProvider().signOut(session.token).catch(() => undefined);
+  adopt(null);
+}
+
+function Shell({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
   const { state, dispatch } = useStore();
   const [tab, setTab] = useState<Tab>('dashboard');
   const [expenseSheet, setExpenseSheet] = useState<{ id?: string } | null>(null);
@@ -112,10 +181,12 @@ function Shell() {
             <PlusIcon />
             Expense
           </button>
+          <AccountMenu session={session} onSignOut={onSignOut} />
         </div>
       </header>
 
       <main className="app__main">
+        {tab === 'dashboard' && <Greeting name={session.account.name} reference={reference} />}
         {tab === 'dashboard' && (
           <Dashboard reference={reference} onEditExpense={(id) => setExpenseSheet({ id })} />
         )}
@@ -128,7 +199,7 @@ function Shell() {
         )}
         {tab === 'plan' && <PlanView reference={reference} />}
         {tab === 'advisor' && <AdvisorView reference={reference} />}
-        {tab === 'settings' && <SettingsView reference={reference} />}
+        {tab === 'settings' && <SettingsView reference={reference} session={session} onSignOut={onSignOut} />}
       </main>
 
       <nav className="nav" aria-label="Sections">
@@ -168,6 +239,84 @@ function Shell() {
               : undefined
           }
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The personalised header.
+ *
+ * Time-of-day greeting plus the user's name — the cheapest thing that makes an
+ * app feel like it belongs to someone rather than being a spreadsheet with a
+ * logo on it.
+ */
+function Greeting({ name, reference }: { name: string; reference: string }) {
+  const hour = new Date().getHours();
+  const partOfDay = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const date = new Date(`${reference}T12:00:00Z`).toLocaleDateString(undefined, {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+
+  return (
+    <div className="greeting">
+      <h1 className="greeting__title">
+        {partOfDay}, {name.split(' ')[0]}
+      </h1>
+      <p className="greeting__date">{date}</p>
+    </div>
+  );
+}
+
+/** Initials button that opens a small account menu. */
+function AccountMenu({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    // Deferred so the click that opened the menu does not immediately close it.
+    const timer = window.setTimeout(() => document.addEventListener('click', close, { once: true }), 0);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('click', close);
+    };
+  }, [open]);
+
+  const initials = session.account.name
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? '')
+    .join('');
+
+  return (
+    <div className="account">
+      <button
+        type="button"
+        className="account__avatar"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Account"
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen((value) => !value);
+        }}
+      >
+        {initials || '?'}
+      </button>
+      {open && (
+        <div className="account__menu" role="menu">
+          <div className="account__who">
+            <strong>{session.account.name}</strong>
+            <span className="tiny faint">{session.account.email}</span>
+          </div>
+          <button type="button" className="account__item" role="menuitem" onClick={onSignOut}>
+            Sign out
+          </button>
+        </div>
       )}
     </div>
   );

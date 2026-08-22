@@ -1024,3 +1024,227 @@ p { margin: 0; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
+
+/* ==========================================================================
+   Auth
+   ========================================================================== */
+
+.auth {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+  background: var(--bg);
+}
+
+.auth__panel {
+  width: 100%;
+  max-width: 400px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 26px 22px calc(22px + env(safe-area-inset-bottom, 0px));
+  animation: rise 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.auth__panel--quiet {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 40px 22px;
+}
+
+.auth__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -0.02em;
+  margin-bottom: 22px;
+}
+
+.auth__title {
+  font-size: 23px;
+  font-weight: 730;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+.auth__subtitle {
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.auth__points {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  font-size: 13.5px;
+  color: var(--text-dim);
+}
+
+.auth__points li {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+}
+
+.auth__points svg {
+  color: var(--positive);
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.auth__footnote {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.code,
+.auth__footnote code {
+  font-family: var(--mono);
+  font-size: 0.94em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+.code {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  padding: 3px 9px;
+}
+
+/* Six-digit code entry: wide tracking so the digits read as separate boxes. */
+.input--code {
+  font-size: 27px;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0.34em;
+  text-indent: 0.34em;
+  font-variant-numeric: tabular-nums;
+  padding: 13px 12px;
+}
+
+/* Password strength ------------------------------------------------------ */
+
+.strength {
+  display: flex;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.strength__bar {
+  height: 4px;
+  flex: 1;
+  border-radius: 999px;
+  background: var(--surface-3);
+  transition: background 0.25s;
+}
+
+.strength__bar--on[data-score='1'] { background: var(--negative); }
+.strength__bar--on[data-score='2'] { background: var(--warning); }
+.strength__bar--on[data-score='3'] { background: #9acd32; }
+.strength__bar--on[data-score='4'] { background: var(--positive); }
+
+/* ==========================================================================
+   Greeting & account menu
+   ========================================================================== */
+
+.greeting {
+  margin-bottom: 4px;
+  animation: alert-in 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.greeting__title {
+  font-size: 22px;
+  font-weight: 720;
+  letter-spacing: -0.025em;
+}
+
+.greeting__date {
+  font-size: 12.5px;
+  color: var(--text-faint);
+  margin-top: 1px;
+}
+
+.account { position: relative; }
+
+.account__avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+
+.account__avatar--lg {
+  width: 44px;
+  height: 44px;
+  font-size: 15px;
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+}
+
+.account__menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  min-width: 208px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: pop 0.14s ease both;
+}
+
+.account__who {
+  display: grid;
+  gap: 2px;
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.account__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 11px 13px;
+  background: none;
+  border: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--negative);
+}
+
+.account__item:hover { background: var(--surface-2); }
+
+@media (pointer: coarse) {
+  .account__avatar { width: 38px; height: 38px; }
+  .account__item { padding: 14px 13px; }
+}

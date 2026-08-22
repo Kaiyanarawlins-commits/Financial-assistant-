@@ -19,6 +19,17 @@ import { newId } from './id';
 
 const STORAGE_KEY = 'cashcompass.chats.v1';
 
+/** Conversations belong to an account, same as the ledger does. */
+let namespace = '';
+
+export function setChatNamespace(userId: string): void {
+  namespace = userId ? `.${userId}` : '';
+}
+
+function key(): string {
+  return `${STORAGE_KEY}${namespace}`;
+}
+
 /** Beyond this, old threads are dropped oldest-first to stay inside the quota. */
 const MAX_CONVERSATIONS = 40;
 
@@ -59,7 +70,7 @@ export interface ConversationSummary {
 function read(): Conversation[] {
   if (typeof localStorage === 'undefined') return [];
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(key());
     if (!raw) return [];
     const parsed = JSON.parse(raw) as Conversation[];
     return Array.isArray(parsed) ? parsed : [];
@@ -71,13 +82,13 @@ function read(): Conversation[] {
 function write(conversations: Conversation[]): void {
   if (typeof localStorage === 'undefined') return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations.slice(0, MAX_CONVERSATIONS)));
+    localStorage.setItem(key(), JSON.stringify(conversations.slice(0, MAX_CONVERSATIONS)));
   } catch {
     // Quota exceeded. Drop the oldest half and try once — losing old threads is
     // a far better outcome than the current one failing to save.
     try {
       localStorage.setItem(
-        STORAGE_KEY,
+        key(),
         JSON.stringify(conversations.slice(0, Math.floor(MAX_CONVERSATIONS / 2))),
       );
     } catch {
@@ -121,7 +132,7 @@ export function deleteConversation(id: string): void {
 
 export function clearConversations(): void {
   if (typeof localStorage === 'undefined') return;
-  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(key());
 }
 
 export function newConversation(): Conversation {
