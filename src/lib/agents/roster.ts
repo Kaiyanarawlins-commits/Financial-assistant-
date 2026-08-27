@@ -1,6 +1,7 @@
 import type { AppState } from '../../types';
 import { formatMonths } from '../debt';
 import { formatMoney, formatPercent } from '../money';
+import { depreciate } from '../business/accounting';
 import type { AdvisorFacts } from './facts';
 import { DISCLAIMER, SHARED_GUARDRAILS } from './guardrails';
 
@@ -23,6 +24,7 @@ export type AgentId =
   | 'investing'
   | 'subscriptions'
   | 'tax'
+  | 'business'
   | 'triage';
 
 export interface Agent {
@@ -44,6 +46,15 @@ export interface Agent {
 
 const m = (cents: number) => formatMoney(cents);
 const p = (value: number, digits = 0) => formatPercent(value, digits);
+
+const METHOD_LABELS: Record<string, string> = {
+  'straight-line': 'straight line',
+  'declining-balance': 'declining balance',
+  'sum-of-years': 'sum-of-years-digits',
+  'units-of-production': 'units of production',
+};
+
+const methodLabel = (method: string) => METHOD_LABELS[method] ?? method;
 
 // ---------------------------------------------------------------------------
 
@@ -588,6 +599,114 @@ If asked anything about the user's own filing, deductions, or an audit, decline 
     },
   },
 
+  business: {
+    id: 'business',
+    name: 'Business & Accounting',
+    beat: 'Depreciation, price levels, margins, and reading a stock rather than picking one',
+    color: '#0ea5e9',
+    keywords: [
+      'depreciation', 'depreciate', 'amortisation', 'amortization', 'straight line',
+      'straight-line', 'declining balance', 'double declining', 'sum of years',
+      'units of production', 'salvage', 'salvage value', 'residual value', 'book value',
+      'useful life', 'capitalise', 'capitalize', 'fixed asset', 'asset register',
+      'appreciation', 'appreciate', 'inflation', 'deflation', 'cpi', 'consumer price index',
+      'purchasing power', 'real terms', 'real rate', 'nominal rate', 'price level',
+      'break even', 'break-even', 'breakeven', 'contribution margin', 'gross margin',
+      'profit margin', 'net margin', 'operating margin', 'markup', 'cogs', 'cost of goods',
+      'overhead', 'npv', 'net present value', 'irr', 'internal rate of return',
+      'payback period', 'roi', 'return on investment',
+      'balance sheet', 'income statement', 'profit and loss', 'bookkeeping', 'accounting',
+      'ledger', 'invoice', 'my business', 'small business', 'revenue',
+      'ticker', 'share price', 'stock price', 'stock quote', 'watchlist', 'moving average',
+      'volatility', '52-week', 'drawdown',
+    ],
+    tools: ['business_calculate', 'get_asset_register', 'get_market_data', 'get_financial_summary', 'calculate'],
+    instructions: `You are the Business & Accounting specialist. You own the accounting side of business mode: depreciation and asset registers, price-level adjustment, pricing and margins, project appraisal, and reading a price series.
+
+Before answering, work through:
+1. Which method the question actually calls for. Straight line is the default and the one most small businesses use; declining balance front-loads the expense; sum-of-years is accelerated but always lands exactly on salvage; units of production charges by output rather than by time. Say why the method you used fits, and mention the alternative when it would give a materially different answer.
+2. Whether the user is confusing depreciation with a fall in market value. They are unrelated: depreciation allocates a known cost across the years that benefit from it, and market value is what someone would pay. A building can appreciate every year while being depreciated to zero on the books, and both figures are correct.
+3. For any price-level question, both sides — what a thing will cost later, and what money will be worth later. They are different numbers and are constantly confused. 3% for 10 years raises a price 34.4% and cuts purchasing power 25.6%.
+4. For margin questions, whether they mean margin (profit over revenue) or markup (profit over cost). A 50% markup is a 33.3% margin. Get this wrong in pricing and a third of the intended profit disappears.
+
+Always use business_calculate rather than doing the arithmetic yourself — a depreciation schedule has to foot to the cent. Call get_asset_register before saying anything about the user's own equipment.
+
+ON STOCKS. You may describe a price series: the last price, the change, moving averages, where it sits in its yearly range, volatility, drawdown. Call get_market_data for these. Three hard rules:
+- If the tool reports unavailable, say so and stop. Never state a price, a market cap, or a company figure from memory — those are stale by definition and this is exactly where a confident wrong number does real damage.
+- Never recommend buying, selling or holding a specific security. Describe what the numbers say and what they mean; the decision is theirs.
+- Never present a moving average, a range position or any other statistic as a prediction. They describe what has already happened.
+
+You are not a CPA and this is not tax advice. Depreciation for tax purposes follows specific schedules — in the US, MACRS with its own class lives and conventions — which differ from the book figures here. Say so whenever a tax return is in view, and send them to a preparer.`,
+    localAnswer: (f, state) => {
+      const out: string[] = [];
+      const assets = state.assets ?? [];
+      const year = Number(f.asOf.slice(0, 4));
+
+      if (assets.length === 0) {
+        out.push(
+          state.settings.businessMode
+            ? `You have no assets in the register yet, so there is nothing of yours to depreciate. Add them on the **Business** tab with cost, salvage value and useful life, and I will produce a schedule that foots to the cent.`
+            : `Business mode is switched off, so there is no asset register to work from. Turn it on in **Settings → Business mode** and the Business tab appears — depreciation schedules, price-level adjustment, break-even and margins, and a market watchlist.`,
+        );
+      } else {
+        let totalCharge = 0;
+        let totalBook = 0;
+        const lines: string[] = [];
+
+        for (const asset of assets) {
+          const schedule = depreciate({
+            method: asset.method,
+            costCents: asset.costCents,
+            salvageCents: asset.salvageCents,
+            lifeYears: asset.lifeYears,
+            factor: asset.factor,
+            totalUnits: asset.totalUnits,
+            unitsPerPeriod: asset.unitsPerPeriod,
+          });
+          const index = year - Number(asset.placedInService.slice(0, 4));
+          const row = schedule.rows[index];
+          const charge = row?.expenseCents ?? 0;
+          const book = row?.closingBookValueCents ?? schedule.endingBookValueCents;
+          totalCharge += charge;
+          totalBook += book;
+          lines.push(
+            `- **${asset.name}** — ${m(asset.costCents)} cost, ${methodLabel(asset.method)}. This year: ${m(charge)}. Book value now **${m(book)}**${row ? ` (year ${index + 1} of ${asset.lifeYears})` : ', fully depreciated'}.`,
+          );
+        }
+
+        out.push(
+          `**${assets.length} ${assets.length === 1 ? 'asset' : 'assets'} on the register**, ${m(totalBook)} of book value remaining.`,
+        );
+        out.push('');
+        out.push(...lines);
+        out.push('');
+        out.push(
+          `This year's depreciation charge across all of them is **${m(totalCharge)}** — an expense on the income statement that never leaves your bank account, which is why profit and cash flow are different numbers.`,
+        );
+      }
+
+      out.push('');
+      out.push('**The four methods, and when each fits:**');
+      out.push('- **Straight line** — (cost − salvage) ÷ life. Equal every year. The default, and what most small businesses use because it is simple to defend.');
+      out.push('- **Declining balance** — a fixed percentage of the *falling* book value, usually 2× the straight-line rate. Front-loads the expense, which matches assets that lose most of their value early. It never quite reaches salvage, so entities commonly switch to straight line for the remaining life.');
+      out.push('- **Sum-of-years-digits** — accelerated like declining balance, but it lands exactly on salvage at the end of life.');
+      out.push('- **Units of production** — cost per unit × units made. For machinery rated in output rather than years; a press that sat idle all year depreciates by nothing.');
+      out.push('');
+      out.push(
+        `**Depreciation is not a fall in market value.** It allocates a cost you have already paid across the years that benefit from it. A van can be worth more than its book value and a building can appreciate every year while being written down to zero — both figures are correct, they answer different questions.`,
+      );
+      out.push('');
+      out.push('**On price levels:** inflation has two sides that get confused. At 3% for ten years a $100 purchase costs **$134.39**, and $100 of cash is worth **$74.41** in today\'s money — a 34.4% price rise and a 25.6% loss of purchasing power. Deflation is the same arithmetic with a negative rate: prices fall and cash gains purchasing power, which sounds pleasant and is why deflationary spirals are so hard to escape — spending waits for next month\'s lower price.');
+      out.push('');
+      out.push(
+        `The **Business** tab runs all of this on your own figures: depreciation schedules, inflation and appreciation, break-even and margins, and a watchlist with moving averages and volatility. ${DISCLAIMER}`,
+      );
+      out.push('');
+      out.push('Book depreciation and tax depreciation are different animals — US tax uses MACRS with its own class lives and conventions. These figures are for your management accounts; take the tax treatment to a preparer.');
+      return out.join('\n');
+    },
+  },
+
   triage: {
     id: 'triage',
     name: 'CashCompass Advisor',
@@ -600,7 +719,7 @@ If asked anything about the user's own filing, deductions, or an audit, decline 
 Answer from the user's actual figures. When a question really belongs to a specialist's domain, answer it well and mention which specialist can go deeper.
 
 If you genuinely cannot help, say so plainly and name what you can do — do not pad with generic advice.`,
-    localAnswer: (f) => {
+    localAnswer: (f, state) => {
       const c = f.cashflow;
       const out: string[] = [];
       out.push(`Here is where you stand for **${f.periodLabel}**:`);
@@ -623,6 +742,9 @@ If you genuinely cannot help, say so plainly and name what you can do — do not
       out.push('- **Investing Educator** — how index funds, ETFs, 401(k)s, IRAs and crypto work');
       out.push('- **Subscription Auditor** — what your recurring charges actually cost per year');
       out.push('- **Tax & Records Guide** — general principles and export for a preparer');
+      if (state.settings.businessMode) {
+        out.push('- **Business & Accounting** — depreciation, inflation, break-even, margins, and your watchlist');
+      }
       return out.join('\n');
     },
   },

@@ -260,6 +260,16 @@ export function WalletIcon() {
   );
 }
 
+export function BriefcaseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect {...stroke} x="2.8" y="7.5" width="18.4" height="12.5" rx="2.5" />
+      <path {...stroke} d="M9 7.5V5.8A1.8 1.8 0 0110.8 4h2.4A1.8 1.8 0 0115 5.8v1.7" />
+      <path {...stroke} d="M2.8 12.5h18.4M11 12.5v2h2v-2" />
+    </svg>
+  );
+}
+
 export function TargetIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">

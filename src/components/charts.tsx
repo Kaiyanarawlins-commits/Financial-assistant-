@@ -241,6 +241,90 @@ export function CategoryTrendChart({
 }
 
 // ---------------------------------------------------------------------------
+// Price series
+// ---------------------------------------------------------------------------
+
+/**
+ * Daily closes with optional moving-average overlays.
+ *
+ * Deliberately unadorned — no gridlines, no axis furniture, no crosshair. The
+ * study metrics beside it carry the precision; this exists to show the shape,
+ * and a chart that looks like a trading terminal would imply a confidence in
+ * the data that a free daily feed does not support.
+ */
+export function PriceChart({
+  closes,
+  overlays = [],
+  height = 132,
+  width = 320,
+}: {
+  closes: number[];
+  overlays?: { values: (number | null)[]; color: string; label: string }[];
+  height?: number;
+  width?: number;
+}) {
+  if (closes.length < 2) return null;
+
+  const pad = 8;
+  const all = [...closes, ...overlays.flatMap((o) => o.values.filter((v): v is number => v !== null))];
+  const min = Math.min(...all);
+  const max = Math.max(...all);
+  const span = max - min || 1;
+
+  const x = (index: number) => pad + (index / (closes.length - 1)) * (width - pad * 2);
+  const y = (value: number) => height - pad - ((value - min) / span) * (height - pad * 2);
+
+  const path = (values: (number | null)[]) => {
+    let started = false;
+    return values
+      .map((value, index) => {
+        if (value === null) {
+          started = false;
+          return '';
+        }
+        const command = started ? 'L' : 'M';
+        started = true;
+        return `${command}${x(index).toFixed(1)} ${y(value).toFixed(1)}`;
+      })
+      .join(' ')
+      .trim();
+  };
+
+  const line = path(closes);
+  const area = `${line}L${x(closes.length - 1).toFixed(1)} ${height - pad}L${x(0).toFixed(1)} ${height - pad}Z`;
+  const rising = closes.at(-1)! >= closes[0]!;
+  const color = rising ? 'var(--positive)' : 'var(--negative)';
+
+  return (
+    <svg
+      width="100%"
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label={`Closing prices, ${closes.length} sessions, ${rising ? 'up' : 'down'} over the window`}
+    >
+      <path d={area} fill={color} opacity="0.1" />
+      {overlays.map((overlay) => {
+        const d = path(overlay.values);
+        return d ? (
+          <path
+            key={overlay.label}
+            d={d}
+            fill="none"
+            stroke={overlay.color}
+            strokeWidth="1.2"
+            strokeDasharray="4 3"
+            opacity="0.85"
+          />
+        ) : null;
+      })}
+      <path d={line} fill="none" stroke={color} strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Net worth line
 // ---------------------------------------------------------------------------
 

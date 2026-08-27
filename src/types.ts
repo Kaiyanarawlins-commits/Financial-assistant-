@@ -148,6 +148,39 @@ export interface NetWorthSnapshot {
 }
 
 // ---------------------------------------------------------------------------
+// Business mode
+// ---------------------------------------------------------------------------
+
+/**
+ * A depreciable asset on the books.
+ *
+ * Kept separate from expenses because it is a different thing: buying a $9,000
+ * machine is not a $9,000 expense, it is an asset that becomes an expense over
+ * the years it is used. Recording it as spending would blow a hole in one
+ * month's cash flow and understate every year after — which is precisely the
+ * mistake business mode exists to prevent.
+ */
+export interface BusinessAsset {
+  id: string;
+  name: string;
+  /** Purchase cost including anything capitalised into it (delivery, install). */
+  costCents: number;
+  /** Expected value at the end of its useful life. Often zero. */
+  salvageCents: number;
+  /** Useful life in whole years. */
+  lifeYears: number;
+  method: 'straight-line' | 'declining-balance' | 'sum-of-years' | 'units-of-production';
+  /** Declining balance only: 2 for double-declining, 1.5 for 150%. */
+  factor?: number;
+  /** Units-of-production only: lifetime rated output, and output so far by year. */
+  totalUnits?: number;
+  unitsPerPeriod?: number[];
+  /** The date it was placed in service, which is when depreciation starts. */
+  placedInService: ISODate;
+  notes?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 
@@ -169,6 +202,13 @@ export interface Settings {
   reminderLeadDays: number;
   /** Household mode simply relabels the UI for a shared budget. */
   householdMode: boolean;
+  /**
+   * Business mode adds the accounting tab — depreciation schedules, price-level
+   * adjustment, break-even and margins, and the market watchlist. Off by
+   * default: a personal user should not have to scroll past a depreciation
+   * register to reach their groceries.
+   */
+  businessMode: boolean;
   /**
    * Colour scheme. 'system' follows the device setting via prefers-color-scheme;
    * the explicit values stamp data-theme on the root element and win over it.
@@ -200,6 +240,10 @@ export interface AppState {
   goals: SavingsGoal[];
   debts: Debt[];
   netWorth: NetWorthSnapshot[];
+  /** Business mode: the depreciation register. */
+  assets: BusinessAsset[];
+  /** Business mode: tickers being followed. Symbols only — no holdings, no broker. */
+  watchlist: string[];
   settings: Settings;
 }
 

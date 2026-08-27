@@ -3,6 +3,7 @@ import { findCategory } from './categories';
 import { monthPeriod, shiftCycle, cycleKeyOf } from './dates';
 import { allLines, computeSnapshot } from './finance';
 import { toDollars } from './money';
+import { depreciate } from './business/accounting';
 
 /**
  * CSV export for tax prep and record keeping.
@@ -75,6 +76,76 @@ export function monthlySummaryCsv(state: AppState, year: number, reference: ISOD
       toDollars(snapshot.remainingBalanceCents).toFixed(2),
     ]);
   }
+  return toCsv(rows);
+}
+
+/**
+ * The depreciation register for one year.
+ *
+ * A preparer asks for exactly these columns, so they are what the file carries:
+ * what the asset cost, when it went into service, the method, this year's
+ * charge, accumulated depreciation and the closing book value. The figures are
+ * book depreciation — tax depreciation follows its own schedules — and the file
+ * says so in a trailing note rather than leaving that to be assumed.
+ */
+export function depreciationCsv(state: AppState, year: number): string {
+  const rows: (string | number)[][] = [
+    [
+      'Asset',
+      'Placed in service',
+      'Method',
+      'Cost',
+      'Salvage',
+      'Life (years)',
+      'Year of life',
+      `${year} depreciation`,
+      'Accumulated',
+      'Book value',
+    ],
+  ];
+
+  let charge = 0;
+  let book = 0;
+
+  for (const asset of state.assets) {
+    const schedule = depreciate({
+      method: asset.method,
+      costCents: asset.costCents,
+      salvageCents: asset.salvageCents,
+      lifeYears: asset.lifeYears,
+      factor: asset.factor,
+      totalUnits: asset.totalUnits,
+      unitsPerPeriod: asset.unitsPerPeriod,
+    });
+    const index = year - Number(asset.placedInService.slice(0, 4));
+    const row = schedule.rows[index] ?? null;
+    const thisYear = row?.expenseCents ?? 0;
+    const closing = row?.closingBookValueCents ?? schedule.endingBookValueCents;
+    charge += thisYear;
+    book += closing;
+
+    rows.push([
+      asset.name,
+      asset.placedInService,
+      asset.method,
+      toDollars(asset.costCents).toFixed(2),
+      toDollars(asset.salvageCents).toFixed(2),
+      asset.lifeYears,
+      row ? index + 1 : 'fully depreciated',
+      toDollars(thisYear).toFixed(2),
+      toDollars(row?.accumulatedCents ?? schedule.totalExpenseCents).toFixed(2),
+      toDollars(closing).toFixed(2),
+    ]);
+  }
+
+  rows.push([]);
+  rows.push(['Total', '', '', '', '', '', '', toDollars(charge).toFixed(2), '', toDollars(book).toFixed(2)]);
+  rows.push([]);
+  rows.push([
+    'Note',
+    'Book depreciation for management accounts. Tax depreciation follows separate schedules (in the US, MACRS class lives and conventions) — take this to a preparer rather than onto a return.',
+  ]);
+
   return toCsv(rows);
 }
 

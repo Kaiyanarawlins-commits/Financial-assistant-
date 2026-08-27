@@ -133,6 +133,46 @@ export function seedState(reference: ISODate = today()): AppState {
     { id: newId('nw'), date: `${currentCycle}-01`, assetsCents: 1_240_000, liabilitiesCents: 2_272_000 },
   ];
 
+  // Business mode is off by default, but its register is seeded so that turning
+  // it on shows a worked schedule rather than an empty table. Three assets, one
+  // per time-based method, because the methods are easiest to understand side by
+  // side on comparable numbers.
+  state.assets = [
+    {
+      id: newId('asset'),
+      name: 'Delivery van',
+      costCents: 3_200_000,
+      salvageCents: 400_000,
+      lifeYears: 8,
+      method: 'straight-line',
+      placedInService: `${monthsBack(5)}-01`,
+      notes: 'Includes signage and the delivery charge, both capitalised into the cost.',
+    },
+    {
+      id: newId('asset'),
+      name: 'Espresso machine',
+      costCents: 900_000,
+      salvageCents: 60_000,
+      lifeYears: 5,
+      method: 'declining-balance',
+      factor: 2,
+      placedInService: `${monthsBack(3)}-01`,
+    },
+    {
+      id: newId('asset'),
+      name: 'CNC router',
+      costCents: 1_450_000,
+      salvageCents: 150_000,
+      lifeYears: 7,
+      method: 'units-of-production',
+      totalUnits: 20_000,
+      unitsPerPeriod: [3_200, 4_100, 3_800],
+      placedInService: `${monthsBack(4)}-01`,
+    },
+  ];
+
+  state.watchlist = ['AAPL', 'MSFT', 'VOO'];
+
   // Anchor safe-to-spend to a real opening balance at the start of the month.
   // Without this the demo would assume the account starts every cycle at zero.
   state.settings.accountBalanceCents = 412_000;

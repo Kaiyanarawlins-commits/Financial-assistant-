@@ -13,6 +13,31 @@ import {
   timeToTarget,
 } from './calculators';
 import { buildFacts, simulateMonthlyChange } from './facts';
+import {
+  appreciate,
+  breakEven,
+  cagr,
+  depreciate,
+  inflationImpact,
+  irr,
+  margins,
+  npv,
+  paybackPeriods,
+  realRatePercent,
+  roiPercent,
+  type DepreciationMethod,
+} from '../business/accounting';
+import {
+  describeMarketError,
+  fetchHistory,
+  fetchQuote,
+  isMarketConfigured,
+  loadMarketConfig,
+  MarketError,
+  normaliseSymbol,
+  providerSupportsHistory,
+} from '../business/market';
+import { study } from '../business/study';
 
 /**
  * Tools the specialists can call.
@@ -166,6 +191,94 @@ export const TOOL_DEFINITIONS: Record<string, Anthropic.Beta.BetaTool> = {
       additionalProperties: false,
     },
   },
+
+  business_calculate: {
+    name: 'business_calculate',
+    description:
+      "Business accounting math: depreciation schedules (straight line, declining balance, sum-of-years-digits, units of production), asset appreciation, inflation and deflation adjustment, real vs nominal rates, break-even, margins and markup, NPV, IRR and ROI. Use this for any accounting question rather than working it out yourself — a depreciation schedule has to foot to the cent, and these do.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        operation: {
+          type: 'string',
+          enum: [
+            'depreciation',
+            'appreciation',
+            'inflation',
+            'real_rate',
+            'break_even',
+            'margins',
+            'npv',
+            'irr',
+            'roi',
+          ],
+          description:
+            'depreciation: full schedule for an asset. appreciation: compound change in market value. inflation: what a sum will cost and what it will be worth (negative rate = deflation). real_rate: inflation-adjusted return, exact Fisher. break_even: units and revenue needed. margins: gross/operating/net margin and markup. npv/irr: appraise a cashflow series. roi: simple return on cost.',
+        },
+        method: {
+          type: 'string',
+          enum: ['straight-line', 'declining-balance', 'sum-of-years', 'units-of-production'],
+          description: 'Depreciation method. Defaults to straight-line.',
+        },
+        cost_dollars: { type: 'number', description: 'Asset cost, for depreciation.' },
+        salvage_dollars: { type: 'number', description: 'Salvage/residual value at end of life.' },
+        life_years: { type: 'number', description: 'Useful life in years.' },
+        factor: { type: 'number', description: 'Declining balance multiplier: 2 for double-declining.' },
+        total_units: { type: 'number', description: 'Units-of-production: lifetime rated output.' },
+        units_per_period: {
+          type: 'array',
+          items: { type: 'number' },
+          description: 'Units-of-production: output in each period.',
+        },
+        amount_dollars: {
+          type: 'number',
+          description: 'The sum being appreciated, inflated, or used as a starting value.',
+        },
+        annual_rate_percent: {
+          type: 'number',
+          description: 'Growth, inflation or discount rate. Negative for deflation or decline.',
+        },
+        inflation_percent: { type: 'number', description: 'Inflation rate, for real_rate.' },
+        years: { type: 'number', description: 'Horizon in years.' },
+        fixed_costs_dollars: { type: 'number', description: 'Break-even: fixed costs per period.' },
+        price_per_unit_dollars: { type: 'number', description: 'Break-even: selling price per unit.' },
+        variable_cost_per_unit_dollars: { type: 'number', description: 'Break-even: variable cost per unit.' },
+        target_profit_dollars: { type: 'number', description: 'Break-even: profit to solve for.' },
+        revenue_dollars: { type: 'number', description: 'Margins: total revenue.' },
+        cogs_dollars: { type: 'number', description: 'Margins: cost of goods sold.' },
+        operating_expenses_dollars: { type: 'number', description: 'Margins: operating expenses.' },
+        cashflows_dollars: {
+          type: 'array',
+          items: { type: 'number' },
+          description: 'NPV/IRR: period 0 first, normally negative, then the returns.',
+        },
+        gain_dollars: { type: 'number', description: 'ROI: profit made.' },
+      },
+      required: ['operation'],
+      additionalProperties: false,
+    },
+  },
+
+  get_asset_register: {
+    name: 'get_asset_register',
+    description:
+      "The user's depreciable assets with cost, method, this year's depreciation charge, accumulated depreciation and current book value. Call this before answering anything about their own equipment or write-offs.",
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+  },
+
+  get_market_data: {
+    name: 'get_market_data',
+    description:
+      "Current price and study metrics for a stock ticker: last price, day change, 20/50/200-day moving averages, position in the yearly range, annualised volatility and maximum drawdown. Only works when the user has connected a market data provider in Settings; if it reports unavailable, say so plainly and never state a price from memory.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Ticker symbol, e.g. AAPL.' },
+      },
+      required: ['symbol'],
+      additionalProperties: false,
+    },
+  },
 };
 
 export function toolsFor(names: string[]): Anthropic.Beta.BetaTool[] {
@@ -192,12 +305,12 @@ const num = (value: unknown, fallback: number): number =>
  * here would produce answers that are wrong by a factor of 100 while looking
  * completely reasonable.
  */
-export function executeTool(
+export async function executeTool(
   name: string,
   input: Record<string, unknown>,
   state: AppState,
   reference: ISODate,
-): unknown {
+): Promise<unknown> {
   switch (name) {
     case 'get_financial_summary': {
       const period = resolvePeriod(String(input.period ?? 'current_month'), reference);
@@ -359,8 +472,310 @@ export function executeTool(
     case 'calculate':
       return runCalculation(input);
 
+    case 'business_calculate':
+      return runBusinessCalculation(input);
+
+    case 'get_asset_register':
+      return assetRegister(state, reference);
+
+    case 'get_market_data':
+      return marketData(String(input.symbol ?? ''));
+
     default:
       return { error: `Unknown tool: ${name}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Business mode
+// ---------------------------------------------------------------------------
+
+function runBusinessCalculation(input: Record<string, unknown>): unknown {
+  const operation = String(input.operation ?? '');
+
+  switch (operation) {
+    case 'depreciation': {
+      const schedule = depreciate({
+        method: (String(input.method ?? 'straight-line') as DepreciationMethod),
+        costCents: dollars(input.cost_dollars),
+        salvageCents: dollars(input.salvage_dollars),
+        lifeYears: num(input.years ?? input.life_years, 5),
+        factor: typeof input.factor === 'number' ? input.factor : undefined,
+        totalUnits: typeof input.total_units === 'number' ? input.total_units : undefined,
+        unitsPerPeriod: Array.isArray(input.units_per_period)
+          ? (input.units_per_period as unknown[]).map((n) => num(n, 0))
+          : undefined,
+      });
+      return {
+        operation,
+        method: schedule.method,
+        cost_dollars: toDollars(schedule.costCents),
+        salvage_dollars: toDollars(schedule.salvageCents),
+        depreciable_base_dollars: toDollars(schedule.depreciableBaseCents),
+        annual_rate_percent: schedule.ratePercent,
+        total_depreciation_dollars: toDollars(schedule.totalExpenseCents),
+        ending_book_value_dollars: toDollars(schedule.endingBookValueCents),
+        schedule: schedule.rows.map((row) => ({
+          year: row.period,
+          opening_book_value_dollars: toDollars(row.openingBookValueCents),
+          depreciation_dollars: toDollars(row.expenseCents),
+          accumulated_dollars: toDollars(row.accumulatedCents),
+          closing_book_value_dollars: toDollars(row.closingBookValueCents),
+          units: row.units,
+        })),
+        notes: schedule.notes,
+      };
+    }
+
+    case 'appreciation': {
+      const years = num(input.years, 10);
+      const rate = num(input.annual_rate_percent, 3);
+      const result = appreciate(dollars(input.amount_dollars), rate, years);
+      return {
+        operation,
+        starting_value_dollars: toDollars(result.startingValueCents),
+        ending_value_dollars: toDollars(result.endingValueCents),
+        total_gain_dollars: toDollars(result.totalGainCents),
+        total_gain_percent: result.totalGainPercent,
+        cagr_percent: result.cagrPercent,
+        declining: result.declining,
+        yearly_values_dollars: result.rows.map((row) => toDollars(row.valueCents)),
+        assumptions: `${rate}% a year compounded annually over ${years} years. Market value, not book value — an appreciating asset can still be depreciated on the books, and both figures are correct.`,
+      };
+    }
+
+    case 'inflation': {
+      const years = num(input.years, 10);
+      const rate = num(input.annual_rate_percent, 3);
+      const result = inflationImpact(dollars(input.amount_dollars), rate, years);
+      return {
+        operation,
+        amount_dollars: toDollars(result.amountCents),
+        rate_percent: rate,
+        years,
+        deflation: result.deflation,
+        future_cost_dollars: toDollars(result.futureCostCents),
+        purchasing_power_dollars: toDollars(result.purchasingPowerCents),
+        cumulative_price_change_percent: result.cumulativePriceChangePercent,
+        purchasing_power_lost_percent: result.purchasingPowerLostPercent,
+        note: 'These are two different figures and are commonly confused: the price rises by the first percentage while purchasing power falls by the second, which is always the smaller number.',
+      };
+    }
+
+    case 'real_rate': {
+      const nominal = num(input.annual_rate_percent, 0);
+      const inflation = num(input.inflation_percent, 0);
+      return {
+        operation,
+        nominal_rate_percent: nominal,
+        inflation_percent: inflation,
+        real_rate_percent: realRatePercent(nominal, inflation),
+        approximation_percent: nominal - inflation,
+        note: 'The exact Fisher figure, not the subtraction shortcut. The gap widens as rates rise.',
+      };
+    }
+
+    case 'break_even': {
+      const result = breakEven(
+        dollars(input.fixed_costs_dollars),
+        dollars(input.price_per_unit_dollars),
+        dollars(input.variable_cost_per_unit_dollars),
+        dollars(input.target_profit_dollars),
+      );
+      return {
+        operation,
+        fixed_costs_dollars: toDollars(result.fixedCostsCents),
+        price_per_unit_dollars: toDollars(result.pricePerUnitCents),
+        variable_cost_per_unit_dollars: toDollars(result.variableCostPerUnitCents),
+        contribution_margin_dollars: toDollars(result.contributionMarginCents),
+        contribution_margin_percent: result.contributionMarginRatioPercent,
+        units_to_break_even: result.unitsToBreakEven,
+        revenue_at_break_even_dollars:
+          result.revenueAtBreakEvenCents === null ? null : toDollars(result.revenueAtBreakEvenCents),
+        units_for_target_profit: result.unitsForTargetProfit,
+        never_breaks_even: result.neverBreaksEven,
+        note: result.neverBreaksEven
+          ? 'Price does not exceed variable cost, so every additional sale increases the loss. Volume cannot fix this — the price or the unit cost has to change.'
+          : undefined,
+      };
+    }
+
+    case 'margins': {
+      const result = margins(
+        dollars(input.revenue_dollars),
+        dollars(input.cogs_dollars),
+        dollars(input.operating_expenses_dollars),
+      );
+      return {
+        operation,
+        revenue_dollars: toDollars(result.revenueCents),
+        cogs_dollars: toDollars(result.cogsCents),
+        operating_expenses_dollars: toDollars(result.operatingExpensesCents),
+        gross_profit_dollars: toDollars(result.grossProfitCents),
+        gross_margin_percent: result.grossMarginPercent,
+        operating_profit_dollars: toDollars(result.operatingProfitCents),
+        operating_margin_percent: result.operatingMarginPercent,
+        net_profit_dollars: toDollars(result.netProfitCents),
+        net_margin_percent: result.netMarginPercent,
+        markup_on_cost_percent: result.markupOnCostPercent,
+        note: 'Margin is profit over revenue; markup is profit over cost. A 50% markup is a 33.3% margin, and pricing one when you meant the other is the most expensive arithmetic error in small business.',
+      };
+    }
+
+    case 'npv':
+    case 'irr': {
+      const flows = Array.isArray(input.cashflows_dollars)
+        ? (input.cashflows_dollars as unknown[]).map((value) => dollars(value))
+        : [];
+      const rate = num(input.annual_rate_percent, 10);
+      const internal = irr(flows);
+      return {
+        operation,
+        cashflows_dollars: flows.map(toDollars),
+        discount_rate_percent: rate,
+        npv_dollars: toDollars(npv(rate, flows)),
+        irr_percent: internal,
+        payback_periods: paybackPeriods(flows),
+        note:
+          internal === null
+            ? 'No internal rate of return exists for this cashflow — it never changes sign, so there is no break-even discount rate.'
+            : 'IRR ignores the scale of the investment. Compare NPV when ranking projects of different sizes.',
+      };
+    }
+
+    case 'roi': {
+      const gain = dollars(input.gain_dollars);
+      const cost = dollars(input.amount_dollars ?? input.cost_dollars);
+      const years = num(input.years, 0);
+      const simple = roiPercent(gain, cost);
+      return {
+        operation,
+        gain_dollars: toDollars(gain),
+        cost_dollars: toDollars(cost),
+        roi_percent: simple,
+        annualised_percent: years > 0 && cost > 0 ? cagr(cost, cost + gain, years) : null,
+        note: years > 0 ? undefined : 'Simple ROI has no time dimension. Supply years for an annualised figure.',
+      };
+    }
+
+    default:
+      return { error: `Unknown operation: ${operation}` };
+  }
+}
+
+/** The user's own depreciable assets, priced to the reference year. */
+function assetRegister(state: AppState, reference: ISODate) {
+  const currentYear = Number(reference.slice(0, 4));
+
+  const items = state.assets.map((asset) => {
+    const schedule = depreciate({
+      method: asset.method,
+      costCents: asset.costCents,
+      salvageCents: asset.salvageCents,
+      lifeYears: asset.lifeYears,
+      factor: asset.factor,
+      totalUnits: asset.totalUnits,
+      unitsPerPeriod: asset.unitsPerPeriod,
+    });
+    // Depreciation starts in the year the asset was placed in service, so the
+    // year index is the elapsed count rather than the calendar year.
+    const yearIndex = currentYear - Number(asset.placedInService.slice(0, 4));
+    const row = schedule.rows[yearIndex] ?? null;
+
+    return {
+      name: asset.name,
+      method: asset.method,
+      placed_in_service: asset.placedInService,
+      cost_dollars: toDollars(asset.costCents),
+      salvage_dollars: toDollars(asset.salvageCents),
+      life_years: asset.lifeYears,
+      year_of_life: row ? yearIndex + 1 : null,
+      this_year_depreciation_dollars: row ? toDollars(row.expenseCents) : 0,
+      accumulated_depreciation_dollars: row ? toDollars(row.accumulatedCents) : toDollars(schedule.totalExpenseCents),
+      book_value_dollars: row
+        ? toDollars(row.closingBookValueCents)
+        : toDollars(schedule.endingBookValueCents),
+      fully_depreciated: !row,
+    };
+  });
+
+  return {
+    count: items.length,
+    total_cost_dollars: items.reduce((sum, item) => sum + item.cost_dollars, 0),
+    total_book_value_dollars: items.reduce((sum, item) => sum + item.book_value_dollars, 0),
+    this_year_depreciation_dollars: items.reduce(
+      (sum, item) => sum + item.this_year_depreciation_dollars,
+      0,
+    ),
+    assets: items,
+  };
+}
+
+/**
+ * Live market data for one ticker.
+ *
+ * Returns `available: false` with a reason rather than throwing, and never
+ * substitutes a remembered price — a fabricated quote is the one failure this
+ * feature cannot survive, and the model is instructed to relay the reason.
+ */
+async function marketData(rawSymbol: string) {
+  const symbol = normaliseSymbol(rawSymbol);
+  if (!symbol) return { available: false, reason: 'invalid-symbol', symbol: rawSymbol };
+
+  const config = loadMarketConfig();
+  if (!isMarketConfigured(config)) {
+    return {
+      available: false,
+      symbol,
+      reason: 'no-provider',
+      message:
+        'No market data provider is connected. The user can add a free API key under Settings → Market data. Do not state a price from memory.',
+    };
+  }
+
+  try {
+    const quote = await fetchQuote(symbol, config);
+    const candles = providerSupportsHistory(config.provider)
+      ? await fetchHistory(symbol, config).catch(() => [])
+      : [];
+    const metrics = candles.length > 0 ? study(candles) : null;
+
+    return {
+      available: true,
+      symbol,
+      as_of: quote.asOf,
+      provider: quote.provider,
+      price_dollars: toDollars(quote.priceCents),
+      previous_close_dollars:
+        quote.previousCloseCents === null ? null : toDollars(quote.previousCloseCents),
+      day_change_dollars: quote.changeCents === null ? null : toDollars(quote.changeCents),
+      day_change_percent: quote.changePercent,
+      study: metrics
+        ? {
+            sample_days: metrics.sampleDays,
+            window_change_percent: metrics.windowChangePercent,
+            sma20_dollars: metrics.sma20Cents === null ? null : toDollars(metrics.sma20Cents),
+            sma50_dollars: metrics.sma50Cents === null ? null : toDollars(metrics.sma50Cents),
+            sma200_dollars: metrics.sma200Cents === null ? null : toDollars(metrics.sma200Cents),
+            period_high_dollars:
+              metrics.periodHighCents === null ? null : toDollars(metrics.periodHighCents),
+            period_low_dollars:
+              metrics.periodLowCents === null ? null : toDollars(metrics.periodLowCents),
+            position_in_range_percent: metrics.positionInRangePercent,
+            annualised_volatility_percent: metrics.annualisedVolatilityPercent,
+            max_drawdown_percent: metrics.maxDrawdownPercent,
+            trend: metrics.trend,
+          }
+        : null,
+      note: 'Descriptive statistics only. Never present a moving average or a range position as a forecast, and never recommend buying or selling a specific security.',
+    };
+  } catch (error) {
+    return {
+      available: false,
+      symbol,
+      reason: error instanceof MarketError ? error.reason : 'error',
+      message: describeMarketError(error),
+    };
   }
 }
 

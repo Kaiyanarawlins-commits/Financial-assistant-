@@ -204,24 +204,33 @@ export async function askClaude(question: string, options: AskOptions): Promise<
 
       // All tool results must return in a single user message — splitting them
       // across messages teaches the model to stop calling tools in parallel.
-      const results: Anthropic.Beta.BetaToolResultBlockParam[] = toolUses.map((use) => {
-        const input = (use.input ?? {}) as Record<string, unknown>;
-        const record = { name: use.name, input };
-        toolCalls.push(record);
-        onToolCall?.(record);
-        try {
-          const output = executeTool(use.name, input, state, reference);
-          toolResults.push(output);
-          return { type: 'tool_result', tool_use_id: use.id, content: JSON.stringify(output) };
-        } catch (error) {
-          return {
-            type: 'tool_result',
-            tool_use_id: use.id,
-            content: `Tool failed: ${error instanceof Error ? error.message : 'unknown error'}`,
-            is_error: true,
-          };
-        }
-      });
+      // Run in parallel and await together: most tools are local and instant,
+      // but the market-data tool goes over the network, and serialising three
+      // lookups behind it would triple the wait for no reason.
+      const results: Anthropic.Beta.BetaToolResultBlockParam[] = await Promise.all(
+        toolUses.map(async (use) => {
+          const input = (use.input ?? {}) as Record<string, unknown>;
+          const record = { name: use.name, input };
+          toolCalls.push(record);
+          onToolCall?.(record);
+          try {
+            const output = await executeTool(use.name, input, state, reference);
+            toolResults.push(output);
+            return {
+              type: 'tool_result' as const,
+              tool_use_id: use.id,
+              content: JSON.stringify(output),
+            };
+          } catch (error) {
+            return {
+              type: 'tool_result' as const,
+              tool_use_id: use.id,
+              content: `Tool failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+              is_error: true,
+            };
+          }
+        }),
+      );
 
       messages.push({ role: 'user', content: results });
     }

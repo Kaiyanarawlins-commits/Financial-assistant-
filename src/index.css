@@ -237,6 +237,30 @@ p { margin: 0; }
   color: var(--accent);
 }
 
+/* The label must clip rather than push the row wide — six tabs at 320px leaves
+   about 53px each, and "Dashboard" alone is wider than that. */
+.nav__item > span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav__inner--six .nav__item {
+  font-size: 9.5px;
+}
+
+@media (max-width: 400px) {
+  .nav__inner--six .nav__item {
+    font-size: 9px;
+    letter-spacing: -0.01em;
+  }
+  .nav__inner--six .nav__item svg {
+    width: 19px;
+    height: 19px;
+  }
+}
+
 .nav__item svg {
   width: 21px;
   height: 21px;
@@ -568,6 +592,13 @@ p { margin: 0; }
   grid-template-columns: 1fr 1fr;
   gap: 10px;
   margin-top: 12px;
+}
+
+/* Three figures side by side where they fit, two where they do not. A fixed
+   three-column grid drops the third cell onto its own row at phone widths,
+   which reads as an error rather than a layout. */
+.split--auto {
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
 }
 
 .split__cell {

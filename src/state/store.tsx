@@ -9,6 +9,7 @@ import {
 } from 'react';
 import type {
   AppState,
+  BusinessAsset,
   Category,
   CycleKey,
   Debt,
@@ -45,6 +46,11 @@ export type Action =
   | { type: 'debt/remove'; id: string }
   | { type: 'networth/add'; snapshot: Omit<NetWorthSnapshot, 'id'> }
   | { type: 'networth/remove'; id: string }
+  | { type: 'asset/add'; asset: Omit<BusinessAsset, 'id'> }
+  | { type: 'asset/update'; id: string; patch: Partial<BusinessAsset> }
+  | { type: 'asset/remove'; id: string }
+  | { type: 'watchlist/add'; symbol: string }
+  | { type: 'watchlist/remove'; symbol: string }
   | { type: 'settings/update'; patch: Partial<Settings> }
   | { type: 'state/replace'; state: AppState }
   | { type: 'state/reset' }
@@ -198,6 +204,27 @@ export function reducer(state: AppState, action: Action): AppState {
 
     case 'networth/remove':
       return { ...state, netWorth: state.netWorth.filter((n) => n.id !== action.id) };
+
+    case 'asset/add':
+      return { ...state, assets: [...state.assets, { ...action.asset, id: newId('asset') }] };
+
+    case 'asset/update':
+      return {
+        ...state,
+        assets: state.assets.map((a) => (a.id === action.id ? { ...a, ...action.patch } : a)),
+      };
+
+    case 'asset/remove':
+      return { ...state, assets: state.assets.filter((a) => a.id !== action.id) };
+
+    case 'watchlist/add': {
+      const symbol = action.symbol.trim().toUpperCase();
+      if (!symbol || state.watchlist.includes(symbol)) return state;
+      return { ...state, watchlist: [...state.watchlist, symbol] };
+    }
+
+    case 'watchlist/remove':
+      return { ...state, watchlist: state.watchlist.filter((s) => s !== action.symbol) };
 
     case 'settings/update':
       return { ...state, settings: { ...state.settings, ...action.patch } };

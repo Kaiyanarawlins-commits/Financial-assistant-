@@ -8,7 +8,7 @@ The name is the thesis: a compass gives direction, and this app's job is to show
 ```bash
 npm install
 npm run dev               # http://localhost:5173
-npm test                  # 207 tests over the engine, agents, guardrails and auth
+npm test                  # 259 tests over the engine, agents, accounting, guardrails and auth
 npm run build             # typecheck + production bundle
 npm run build:standalone  # everything inlined into one portable HTML file
 ```
@@ -20,7 +20,7 @@ to run the app.
 
 ### Single-file build
 
-Because the app makes no network requests, `npm run build:standalone` can inline the JS and CSS into one
+Nothing in the app requires a network by default, so `npm run build:standalone` can inline the JS and CSS into one
 self-contained file that runs from a `file://` URL, an email attachment, or any host with a strict content-security
 policy:
 
@@ -29,7 +29,9 @@ dist/cashcompass.html           complete document, double-clickable
 dist/cashcompass.fragment.html  body content only, for hosts supplying their own skeleton
 ```
 
-Roughly 264 kB, no external requests. Where `localStorage` is unavailable — a sandboxed iframe, private browsing —
+Roughly 615 kB — most of it the Anthropic SDK — and no external requests unless you opt in — the Claude-backed advisor and business mode's market data
+are the only two things that reach the network, and both are off until you supply a key. Where `localStorage` is
+unavailable — a sandboxed iframe, private browsing —
 persistence degrades to in-memory for the session rather than failing; the app still runs, it just reopens with demo
 data.
 
@@ -131,6 +133,10 @@ src/
     exporter.ts         CSV export for tax prep
     advisorConfig.ts    Advisor backend settings (API key kept out of AppState)
     chatHistory.ts      Saved conversations, persisted separately from AppState
+    business/
+      accounting.ts     Depreciation, price levels, break-even, margins, appraisal
+      market.ts         Market data providers, caching, typed failures
+      study.ts          Moving averages, volatility, drawdown — computed locally
     agents/
       facts.ts          Precomputed figures every specialist answers from
       roster.ts         The seven specialists: prompts, tools, local answers
@@ -208,6 +214,7 @@ payoff date, total interest, and each goal.
 | Investing Educator | Asset classes and retirement accounts — never a recommendation |
 | Subscription Auditor | Recurring charges and what they cost annually |
 | Tax & Records Guide | General principles and export for a preparer |
+| Business & Accounting | Depreciation, price levels, margins, and reading a price series |
 
 Each carries its own system prompt stating the analysis it must perform *before* answering, its own tool subset, and
 a deterministic local implementation. A keyword-scored router picks one — deterministic and local, because routing
@@ -389,6 +396,8 @@ numbers are a known migraine and vestibular trigger, and the figure *is* the con
 | Irregular income mode | Yes — 3–6 month trailing average |
 | Export / tax view | Yes — CSV by category, by transaction, by month |
 | Household mode | Partial — relabels the UI; no multi-user sync |
+| Business mode — depreciation, inflation, break-even, margins | Yes — four methods, schedules that foot to the cent |
+| Stock prices and study metrics | Yes, with your own free API key — see below |
 | Bill due-date reminders | In-app only — push needs a service worker and a server |
 | Bank/card sync | Not implemented — needs an aggregator (Plaid or similar) and a backend |
 
@@ -396,21 +405,80 @@ The last two are honest gaps rather than oversights: both require infrastructure
 
 ---
 
+## Business mode
+
+Off by default; the toggle is in **Settings → Business mode**, and it adds a sixth tab. Four panels:
+
+**Assets.** A depreciation register. Four methods — straight line, declining balance (any multiplier), sum-of-years-digits,
+and units of production — each producing a full schedule with opening book value, the annual charge, accumulated
+depreciation and the closing value. Every schedule **foots exactly**: rounding each year independently leaves the total a
+few cents off the depreciable base, so each method rounds per period and lets the final period absorb the remainder. That
+is not fussiness — a schedule that does not sum to cost less salvage is not usable in a set of books.
+
+Declining balance is capped at salvage rather than allowed to run through it, and the schedule says how much book value
+is left stranded above the floor, because that is the number that tells you when to switch to straight line.
+
+**Money value.** Inflation and deflation, and the distinction people get wrong: what a thing will *cost* later and what
+money will be *worth* later are different figures. At 3% for ten years a price rises 34.4% while purchasing power falls
+25.6%. Both are shown, side by side, with the year-by-year table. Negative rates are deflation and run through the same
+arithmetic. Alongside it, compound appreciation and the **exact Fisher real rate** — 12% nominal against 8% inflation is
+3.70%, not the 4% you get from subtracting.
+
+Appreciation is kept visibly distinct from depreciation, since conflating them is the most common small-business
+bookkeeping error: depreciation allocates a cost already paid across the years that consume it, appreciation is a change
+in market value, and a building can do both at once with neither figure being wrong.
+
+**Pricing.** Break-even units and revenue, contribution margin, and units required for a target profit. When price does
+not exceed variable cost it says the plan never breaks even rather than printing a number — volume cannot fix a negative
+contribution margin. Margins run down the statement to operating profit, with margin and markup shown together because
+a 50% markup is a 33.3% margin and pricing to the wrong one costs a third of the intended profit.
+
+**Stocks.** A watchlist with the last price, the day's change, and locally computed study metrics: 20/50/200-day moving
+averages, position within the yearly range, annualised volatility from daily log returns, and maximum drawdown. The chart
+overlays the moving averages on the closes.
+
+### Why you supply the market data key
+
+A published static app has no secrets. Anything compiled into the bundle is readable by anyone who opens devtools, and a
+free market-data key shared across every user is rate-limited into uselessness within the hour. So CashCompass ships
+without one: you paste your own free key (Alpha Vantage or Finnhub) under **Settings → Market data** or the Stocks tab,
+it is stored in its own localStorage slot — never in `AppState`, so it is never written into a backup file — and it goes
+to that provider and nowhere else.
+
+With no key, the Stocks tab says so and stays empty. It does not show sample prices, a cached figure dressed up as
+live, or anything else invented; the same rule that governs the advisor's numbers governs this. Quotes are cached for a
+minute and history for six hours, both because free tiers are strict (Alpha Vantage allows roughly 25 requests a day) and
+because the advisor's `get_market_data` tool reads the same cache, so asking about a symbol costs nothing extra. Every
+quote carries how long ago it was fetched, and requests time out after ten seconds rather than spinning forever.
+
+Finnhub's free tier serves quotes but not daily history, so the charts and study metrics stay blank on it. The UI says
+which provider can do what rather than leaving you to work it out from an empty panel.
+
+The advisor may describe a series and refuses to recommend a security — that guardrail predates business mode and
+applies unchanged here.
+
+---
+
 ## Testing
 
-207 tests, all against the pure modules:
+259 tests, all against the pure modules:
 
 ```
 finance.test.ts   45  balance maths, recurring expansion, idempotency, month-length
                       clamping, leap years, safe-to-spend, buffer mode, cash-on-hand
                       anchoring, income schedules, irregular income, categories,
                       trends, reminders
-agents.test.ts   127  facts, routing, calculators, figure parsing, guardrails,
+agents.test.ts   138  facts, routing, calculators, figure parsing, guardrails,
                       tool execution, specialist answers, hypotheticals,
                       conversation memory, scenario refinement, numeric
                       verification, chat history, the conversational layer,
                       password and email validation
 advisor.test.ts   26  redaction, guardrails, topic matching, insights
+business.test.ts  41  depreciation schedules footing to the cent, salvage floors,
+                      appreciation, inflation vs. purchasing power, deflation,
+                      Fisher real rates, CPI restatement, break-even, margin vs.
+                      markup, NPV/IRR/payback, moving averages, volatility,
+                      drawdown, ticker validation, provider failure modes
 debt.test.ts       9  payoff simulation, strategy comparison, unpayable plans
 ```
 
@@ -441,6 +509,12 @@ horizontal overflow from 320px to 1100px in both colour schemes.
 
 ## Data handling
 
-Everything stays in the browser. No network calls, no analytics, no accounts. Backup and restore are manual JSON
-download and upload. Per the spec, no sensitive identifier — SSN, full account or card number, credential — is ever
-stored, and user input is redacted before it reaches the advisor's context or the transcript.
+Everything stays in the browser. No analytics, and no network calls you have not switched on: the Claude-backed
+advisor and business mode's market data are the only two, and each stays inert until you supply a key. Backup and
+restore are manual JSON download and upload. Per the spec, no sensitive identifier — SSN, full account or card number,
+credential — is ever stored, and user input is redacted before it reaches the advisor's context or the transcript.
+
+API keys live in their own `localStorage` slots rather than in `AppState`, for one specific reason: `AppState` is what
+"Download backup" serialises, and a key sitting there would be written into a JSON file the user might email to
+themselves. A backup carries finances and never credentials. The watchlist holds ticker symbols only — no holdings, no
+share counts, no broker connection.

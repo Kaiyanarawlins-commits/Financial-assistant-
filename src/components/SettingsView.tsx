@@ -4,6 +4,7 @@ import { CATEGORY_COLORS, categoryIdFromName } from '../lib/categories';
 import { today } from '../lib/dates';
 import {
   categorySummaryCsv,
+  depreciationCsv,
   downloadFile,
   monthlySummaryCsv,
   transactionsCsv,
@@ -151,6 +152,12 @@ export function SettingsView({
           checked={state.settings.householdMode}
           onChange={(householdMode) => dispatch({ type: 'settings/update', patch: { householdMode } })}
         />
+        <Toggle
+          label="Business mode"
+          hint="Adds the Business tab: depreciation schedules, inflation and appreciation, break-even and margins, and a market watchlist."
+          checked={state.settings.businessMode}
+          onChange={(businessMode) => dispatch({ type: 'settings/update', patch: { businessMode } })}
+        />
         <div style={{ padding: '12px 0 0' }}>
           <Field label="Warn me this many days before a bill is due">
             <select
@@ -236,6 +243,17 @@ export function SettingsView({
           >
             {year} by month
           </button>
+          {state.settings.businessMode && state.assets.length > 0 && (
+            <button
+              type="button"
+              className="btn btn--sm"
+              onClick={() =>
+                downloadFile(`cashcompass-${year}-depreciation.csv`, depreciationCsv(state, year))
+              }
+            >
+              {year} depreciation
+            </button>
+          )}
         </div>
       </Card>
 

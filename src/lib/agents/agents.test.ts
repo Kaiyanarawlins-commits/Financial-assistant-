@@ -126,6 +126,12 @@ describe('routing', () => {
     ['how do quarterly estimated taxes work?', 'tax'],
     ['what house could I afford?', 'budget'],
     ['what if I invested $400 a month at 7%?', 'investing'],
+    ['how do I calculate depreciation on my van?', 'business'],
+    ['what is straight line depreciation?', 'business'],
+    ['how does deflation differ from inflation?', 'business'],
+    ['how many units do I need to break even?', 'business'],
+    ['what is the difference between margin and markup?', 'business'],
+    ['what is the current share price of AAPL?', 'business'],
   ];
 
   for (const [question, expected] of cases) {
@@ -305,15 +311,15 @@ describe('tools', () => {
     }
   });
 
-  it('returns debt analysis in dollars, not cents', () => {
-    const result = executeTool('get_debt_analysis', {}, state, REFERENCE) as Record<string, number>;
+  it('returns debt analysis in dollars, not cents', async () => {
+    const result = (await executeTool('get_debt_analysis', {}, state, REFERENCE)) as Record<string, number>;
     // $22.72k of debt in the seed — a cents leak would read as millions.
     expect(result.total_debt_dollars).toBeGreaterThan(1_000);
     expect(result.total_debt_dollars).toBeLessThan(100_000);
   });
 
-  it('returns category detail with transactions', () => {
-    const result = executeTool('get_category_detail', { category_id: 'housing' }, state, REFERENCE) as {
+  it('returns category detail with transactions', async () => {
+    const result = (await executeTool('get_category_detail', { category_id: 'housing' }, state, REFERENCE)) as {
       found: boolean;
       spent_dollars: number;
       transactions: unknown[];
@@ -323,40 +329,116 @@ describe('tools', () => {
     expect(result.transactions.length).toBeGreaterThan(0);
   });
 
-  it('filters transactions by category and amount', () => {
-    const result = executeTool(
+  it('filters transactions by category and amount', async () => {
+    const result = (await executeTool(
       'list_transactions',
       { min_amount_dollars: 400, limit: 5 },
       state,
       REFERENCE,
-    ) as { transactions: { amount_dollars: number }[] };
+    )) as { transactions: { amount_dollars: number }[] };
     expect(result.transactions.every((t) => t.amount_dollars >= 400)).toBe(true);
     expect(result.transactions.length).toBeLessThanOrEqual(5);
   });
 
-  it('runs hypothetical arithmetic through calculate', () => {
-    const result = executeTool(
+  it('runs hypothetical arithmetic through calculate', async () => {
+    const result = (await executeTool(
       'calculate',
       { operation: 'compound_growth', monthly_dollars: 500, annual_rate_percent: 7, years: 30 },
       state,
       REFERENCE,
-    ) as { future_value_dollars: number; assumptions: string };
+    )) as { future_value_dollars: number; assumptions: string };
     expect(result.future_value_dollars).toBeGreaterThan(500_000);
     expect(result.assumptions).toMatch(/not guaranteed/i);
   });
 
-  it('computes affordability through calculate', () => {
-    const result = executeTool(
+  it('computes affordability through calculate', async () => {
+    const result = (await executeTool(
       'calculate',
       { operation: 'affordability', gross_annual_income_dollars: 96_000, existing_monthly_debt_dollars: 840 },
       state,
       REFERENCE,
-    ) as { max_monthly_housing_dollars: number };
+    )) as { max_monthly_housing_dollars: number };
     expect(result.max_monthly_housing_dollars).toBeCloseTo(2240, 0);
   });
 
-  it('reports an unknown tool rather than throwing', () => {
-    expect(executeTool('nope', {}, state, REFERENCE)).toHaveProperty('error');
+  it('produces a depreciation schedule through business_calculate', async () => {
+    const result = (await executeTool(
+      'business_calculate',
+      {
+        operation: 'depreciation',
+        method: 'straight-line',
+        cost_dollars: 32_000,
+        salvage_dollars: 4_000,
+        life_years: 8,
+      },
+      state,
+      REFERENCE,
+    )) as {
+      total_depreciation_dollars: number;
+      ending_book_value_dollars: number;
+      schedule: { depreciation_dollars: number }[];
+    };
+
+    expect(result.schedule).toHaveLength(8);
+    expect(result.total_depreciation_dollars).toBe(28_000);
+    expect(result.ending_book_value_dollars).toBe(4_000);
+  });
+
+  it('separates future cost from purchasing power in the inflation tool', async () => {
+    const result = (await executeTool(
+      'business_calculate',
+      { operation: 'inflation', amount_dollars: 100, annual_rate_percent: 3, years: 10 },
+      state,
+      REFERENCE,
+    )) as { future_cost_dollars: number; purchasing_power_dollars: number };
+
+    expect(result.future_cost_dollars).toBeCloseTo(134.39, 2);
+    expect(result.purchasing_power_dollars).toBeCloseTo(74.41, 2);
+  });
+
+  it('prices the asset register to the current year', async () => {
+    const result = (await executeTool('get_asset_register', {}, state, REFERENCE)) as {
+      count: number;
+      this_year_depreciation_dollars: number;
+      assets: { name: string; cost_dollars: number; book_value_dollars: number }[];
+    };
+
+    expect(result.count).toBe(state.assets.length);
+    expect(result.this_year_depreciation_dollars).toBeGreaterThan(0);
+    // Every asset has been in service for at least one year in the seed, so
+    // book value must have fallen below cost.
+    for (const asset of result.assets) {
+      expect(asset.book_value_dollars).toBeLessThan(asset.cost_dollars);
+    }
+  });
+
+  it('reports market data as unavailable rather than inventing a price', async () => {
+    const result = (await executeTool(
+      'get_market_data',
+      { symbol: 'AAPL' },
+      state,
+      REFERENCE,
+    )) as { available: boolean; reason: string; message?: string };
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toBe('no-provider');
+    expect(result.message).toMatch(/from memory/i);
+  });
+
+  it('rejects a symbol that is not a ticker', async () => {
+    const result = (await executeTool(
+      'get_market_data',
+      { symbol: 'what should i buy' },
+      state,
+      REFERENCE,
+    )) as { available: boolean; reason: string };
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toBe('invalid-symbol');
+  });
+
+  it('reports an unknown tool rather than throwing', async () => {
+    expect(await executeTool('nope', {}, state, REFERENCE)).toHaveProperty('error');
   });
 });
 
@@ -657,13 +739,13 @@ describe('numeric verification', () => {
     expect(report.ok).toBe(true);
   });
 
-  it('accepts figures returned by a tool this turn', () => {
-    const toolResult = executeTool(
+  it('accepts figures returned by a tool this turn', async () => {
+    const toolResult = (await executeTool(
       'calculate',
       { operation: 'compound_growth', monthly_dollars: 400, annual_rate_percent: 7, years: 25 },
       state,
       REFERENCE,
-    ) as { future_value_dollars: number };
+    )) as { future_value_dollars: number };
 
     const withTool = verifyAnswer(
       `You would have ${formatMoney(Math.round(toolResult.future_value_dollars * 100))}.`,

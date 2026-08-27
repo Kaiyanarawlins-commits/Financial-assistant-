@@ -9,15 +9,18 @@ import {
 } from './lib/auth';
 import { setStorageNamespace } from './lib/storage';
 import { setChatNamespace } from './lib/chatHistory';
+import { clearMarketCache } from './lib/business/market';
 import { today } from './lib/dates';
 import { pendingConfirmations, upcomingBills } from './lib/finance';
 import { Dashboard } from './components/Dashboard';
 import { MoneyView } from './components/MoneyView';
 import { PlanView } from './components/PlanView';
 import { AdvisorView } from './components/AdvisorView';
+import { BusinessView } from './components/BusinessView';
 import { SettingsView } from './components/SettingsView';
 import { ExpenseSheet, type ExpenseDraft } from './components/forms';
 import {
+  BriefcaseIcon,
   CompassIcon,
   GearIcon,
   HomeIcon,
@@ -27,12 +30,13 @@ import {
   TargetIcon,
 } from './components/ui';
 
-type Tab = 'dashboard' | 'money' | 'plan' | 'advisor' | 'settings';
+type Tab = 'dashboard' | 'money' | 'plan' | 'business' | 'advisor' | 'settings';
 
 const TABS: { id: Tab; label: string; icon: () => JSX.Element }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: HomeIcon },
   { id: 'money', label: 'Money', icon: ListIcon },
   { id: 'plan', label: 'Plan', icon: TargetIcon },
+  { id: 'business', label: 'Business', icon: BriefcaseIcon },
   { id: 'advisor', label: 'Advisor', icon: SparkIcon },
   { id: 'settings', label: 'Settings', icon: GearIcon },
 ];
@@ -52,6 +56,10 @@ export default function App() {
   const adopt = useCallback((next: Session | null) => {
     setStorageNamespace(next?.account.id ?? '');
     setChatNamespace(next?.account.id ?? '');
+    // Quotes are held in memory across the session. Dropping them on any change
+    // of account means one person's watchlist data cannot surface on the next
+    // person's screen on a shared laptop.
+    clearMarketCache();
     rememberSessionToken(next?.token ?? null);
     setSession(next);
   }, []);
@@ -141,6 +149,14 @@ function Shell({ session, onSignOut }: { session: Session; onSignOut: () => void
     }
   }, [state.settings.theme]);
 
+  // Business mode is opt-in, so the tab only exists when it is on. Turning it
+  // off while standing on that tab has to move the user somewhere real, or the
+  // main area renders nothing under a nav that no longer has the button.
+  const tabs = state.settings.businessMode ? TABS : TABS.filter((entry) => entry.id !== 'business');
+  useEffect(() => {
+    if (tab === 'business' && !state.settings.businessMode) setTab('dashboard');
+  }, [tab, state.settings.businessMode]);
+
   const editing = expenseSheet?.id ? state.expenses.find((e) => e.id === expenseSheet.id) : undefined;
 
   const alertCount =
@@ -198,13 +214,14 @@ function Shell({ session, onSignOut }: { session: Session; onSignOut: () => void
           />
         )}
         {tab === 'plan' && <PlanView reference={reference} />}
+        {tab === 'business' && <BusinessView reference={reference} />}
         {tab === 'advisor' && <AdvisorView reference={reference} />}
         {tab === 'settings' && <SettingsView reference={reference} session={session} onSignOut={onSignOut} />}
       </main>
 
       <nav className="nav" aria-label="Sections">
-        <div className="nav__inner">
-          {TABS.map(({ id, label, icon: Icon }) => (
+        <div className={`nav__inner${tabs.length > 5 ? ' nav__inner--six' : ''}`}>
+          {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               type="button"

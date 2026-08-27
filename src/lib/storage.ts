@@ -32,12 +32,15 @@ export function emptyState(): AppState {
     goals: [],
     debts: [],
     netWorth: [],
+    assets: [],
+    watchlist: [],
     settings: {
       bufferMode: false,
       irregularIncomeMode: false,
       irregularLookbackMonths: 3,
       reminderLeadDays: 3,
       householdMode: false,
+      businessMode: false,
       theme: 'system',
     },
   };
@@ -61,6 +64,11 @@ export function loadState(): AppState | null {
       ...base,
       ...parsed,
       categories: parsed.categories?.length ? parsed.categories : base.categories,
+      // Business mode arrived after the first releases, so a state file written
+      // by an earlier version has neither key. Defaulting them here keeps every
+      // `.map` downstream from meeting an undefined.
+      assets: parsed.assets ?? base.assets,
+      watchlist: parsed.watchlist ?? base.watchlist,
       settings: { ...base.settings, ...(parsed.settings ?? {}) },
       schemaVersion: SCHEMA_VERSION,
     };
@@ -99,6 +107,8 @@ export function deserializeState(json: string): AppState | null {
     return {
       ...base,
       ...parsed,
+      assets: parsed.assets ?? base.assets,
+      watchlist: parsed.watchlist ?? base.watchlist,
       settings: { ...base.settings, ...(parsed.settings ?? {}) },
       schemaVersion: SCHEMA_VERSION,
     };
