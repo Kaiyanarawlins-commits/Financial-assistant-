@@ -270,6 +270,18 @@ describe('guardrails', () => {
 
   it('refuses individualized tax questions', () => {
     expect(screenQuestion('can I deduct my home office on my taxes?')?.kind).toBe('individual-tax-legal');
+    expect(screenQuestion('I need to set up a trust for my kids')?.kind).toBe('individual-tax-legal');
+    expect(screenQuestion('do I need a will?')?.kind).toBe('individual-tax-legal');
+  });
+
+  it('does not read the future tense as an estate-planning question', () => {
+    // "will" and "trust" have everyday senses that swamp the legal ones. Listing
+    // them bare refused most sentences anyone writes about money in the future.
+    expect(screenQuestion('i will save 500 a month')).toBeNull();
+    expect(screenQuestion('i want to borrow 20000 for a car, what will it cost me?')).toBeNull();
+    expect(screenQuestion('how much will I have saved by June?')).toBeNull();
+    expect(screenQuestion('what will my balance be after rent?')).toBeNull();
+    expect(screenQuestion('I trust the numbers, but will I be short?')).toBeNull();
   });
 
   it('allows educational and hypothetical questions through', () => {
@@ -901,6 +913,101 @@ describe('income-minus-expenses scenarios', () => {
 });
 
 // ---------------------------------------------------------------------------
+
+describe('borrowing scenarios', () => {
+  const state = demo();
+  const ask = (q: string) => askLocally(q, state, REFERENCE).text;
+
+  // The reported failure: a question about a loan the user is considering came
+  // back as a summary of the three debts they already have.
+  it("answers the reported question from the question's own figures", () => {
+    const reply = ask(
+      'i want to take out a 5k loan with 5% interest. How much would i be paying back in total?',
+    );
+    expect(reply).toContain('$5,000.00');
+    expect(reply).toContain('5.00%');
+    // The five-year line is the standard check figure for $5k at 5%.
+    expect(reply).toContain('$5,661.60');
+    expect(reply).toContain('$94.36');
+
+    // The answer must be *about the loan*. One labelled line relating it to the
+    // user's existing position is good advice and is allowed; what is not
+    // allowed is the reported failure, where the whole reply was the stored
+    // debt summary and the loan went unmentioned.
+    const [opening] = reply.split('Against your own position');
+    expect(opening).not.toContain('$22,720.00');
+    expect(reply).not.toMatch(/Store card|avalanche|Minimums total/i);
+  });
+
+  it('gives one exact total when the term is supplied', () => {
+    const reply = ask('if i borrow $5,000 at 5% over 3 years what do i pay back in total?');
+    expect(reply).toContain('$5,394.60');
+    expect(reply).toContain('$394.60');
+    expect(reply).toContain('$149.85');
+  });
+
+  it('asks for the rate rather than inventing one', () => {
+    const reply = ask('i want to borrow 20000 for a car, what will it cost me?');
+    expect(reply).toContain('$20,000.00');
+    expect(reply).toMatch(/not without the rate|APR and the term/i);
+    expect(reply).not.toContain('$22,720.00');
+  });
+
+  it('shows the term trade-off when no term is given', () => {
+    const reply = ask('what would a 10k loan at 8% cost me in total?');
+    expect(reply).toMatch(/1 year/);
+    expect(reply).toMatch(/5 years/);
+    expect(reply).toMatch(/more.{0,20}in interest/i);
+  });
+});
+
+describe('questions that carry their own figures', () => {
+  const state = demo();
+  const ask = (q: string) => askLocally(q, state, REFERENCE).text;
+
+  // The backstop behind the cue list: a figure absent from the user's data was
+  // supplied by the question, so the question is not about the ledger.
+  it('never answers a self-supplied figure with stored data', () => {
+    const reply = ask('how much would i pay back on 7500 at 11%?');
+    expect(reply).toContain('$7,500.00');
+    expect(reply).not.toContain('$22,720.00');
+    expect(reply).not.toContain('$6,800.00');
+  });
+
+  it('still treats a figure the user actually has as a question about their data', () => {
+    // $3,400 is the seeded Visa balance, so this is a ledger question and must
+    // not be hijacked into the scenario path.
+    const reply = ask('why is my $3,400 Visa balance costing so much?');
+    expect(reply).toMatch(/Visa/);
+    expect(reply).toContain('24.99%');
+    expect(reply).not.toMatch(/depends entirely on the term/i);
+  });
+
+  it('leaves ordinary questions about stored data alone', () => {
+    const reply = ask('where did my money go this month?');
+    expect(reply).toContain('$6,800.00');
+  });
+});
+
+describe('named accounts reach their detail rather than a summary', () => {
+  const state = demo();
+  const ask = (q: string) => askLocally(q, state, REFERENCE).text;
+
+  it('answers about the account the question names', () => {
+    const reply = ask('why is my Visa costing so much?');
+    expect(reply).toMatch(/Visa/);
+    expect(reply).toContain('24.99%');
+    // Not the generalist's position summary.
+    expect(reply).not.toMatch(/I have specialists for the detail/);
+  });
+
+  it('does not hijack advice questions that merely echo a goal name', () => {
+    // The regression this is scoped to avoid: "emergency fund" is also the name
+    // of a seeded goal, and this must stay advice rather than a balance readout.
+    const reply = ask('how big should my emergency fund be?');
+    expect(reply).toMatch(/essential|3 months|months of cover|range/i);
+  });
+});
 
 describe('scenario refinement across turns', () => {
   const state = demo();

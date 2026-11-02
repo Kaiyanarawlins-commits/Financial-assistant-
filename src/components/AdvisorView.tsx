@@ -11,6 +11,7 @@ import {
   isConfigured,
   resolveReferences,
   route,
+  warmSdk,
   type Agent,
   type ConversationMemory,
   type ToolCallRecord,
@@ -178,6 +179,11 @@ function Chat({
   }, [messages, liveTools]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  // The SDK is a lazy chunk now, so start fetching it when the advisor opens
+  // with a model backend configured. By the time a question is typed it is
+  // usually cached, and the saving on first paint costs nothing in latency.
+  useEffect(() => warmSdk(claudeConfig), [claudeConfig]);
 
   const send = async (text: string) => {
     const trimmed = text.trim();

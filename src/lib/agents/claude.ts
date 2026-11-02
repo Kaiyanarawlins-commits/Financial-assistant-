@@ -1,4 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
+// Type-only, so the SDK contributes nothing to the bundle at this import. The
+// runtime copy is fetched on demand by `loadSdk` below.
+import type Anthropic from '@anthropic-ai/sdk';
 import type { AppState, ISODate } from '../../types';
 import { redactSensitive } from '../advisor';
 import { screenAnswer, screenQuestion } from './guardrails';
@@ -74,17 +76,61 @@ function isFableFamily(model: ModelId): boolean {
   return model === 'claude-fable-5';
 }
 
-function createClient(config: ClaudeConfig): Anthropic {
+/**
+ * The SDK, fetched only when it is actually going to be used.
+ *
+ * It is by far the largest thing this app could ship — several hundred
+ * kilobytes — and the default advisor backend is `local`, so most users never
+ * call it at all. A static import made every first paint on every phone pay for
+ * a code path the majority never take. Loading it at the point a model request
+ * is genuinely about to happen moves that cost onto the people who opted in.
+ *
+ * The promise is cached so concurrent questions share one fetch, and cleared on
+ * failure so a request made offline does not poison every later attempt.
+ */
+type AnthropicModule = typeof import('@anthropic-ai/sdk');
+
+let sdkPromise: Promise<AnthropicModule> | null = null;
+let sdk: AnthropicModule | null = null;
+
+function loadSdk(): Promise<AnthropicModule> {
+  if (!sdkPromise) {
+    sdkPromise = import('@anthropic-ai/sdk')
+      .then((module) => {
+        sdk = module;
+        return module;
+      })
+      .catch((error: unknown) => {
+        sdkPromise = null;
+        throw error;
+      });
+  }
+  return sdkPromise;
+}
+
+/**
+ * Starts the fetch without waiting for it.
+ *
+ * Called when the advisor view opens with a model backend configured, so the
+ * chunk is usually in cache by the time a question is asked and the lazy load
+ * costs nothing the user can perceive. Failure is ignored here on purpose — the
+ * real request retries and reports properly.
+ */
+export function warmSdk(config: Partial<ClaudeConfig> | undefined): void {
+  if (isConfigured(config)) void loadSdk().catch(() => undefined);
+}
+
+function createClient(module: AnthropicModule, config: ClaudeConfig): Anthropic {
   if (config.proxyUrl) {
     // The proxy injects the real key server-side; the placeholder satisfies the
     // SDK's constructor without a key ever existing in the browser.
-    return new Anthropic({
+    return new module.default({
       apiKey: 'proxy',
       baseURL: config.proxyUrl,
       dangerouslyAllowBrowser: true,
     });
   }
-  return new Anthropic({ apiKey: config.apiKey ?? '', dangerouslyAllowBrowser: true });
+  return new module.default({ apiKey: config.apiKey ?? '', dangerouslyAllowBrowser: true });
 }
 
 export function isConfigured(config: Partial<ClaudeConfig> | undefined): boolean {
@@ -132,7 +178,22 @@ export async function askClaude(question: string, options: AskOptions): Promise<
   const blocked = screenQuestion(clean);
   if (blocked) return { text: blocked.text, agent, toolCalls: [], refused: true };
 
-  const client = createClient(config);
+  // Fetching the SDK is the first thing that can fail offline, and it must fail
+  // the same way every other network problem does: the local specialist has a
+  // correct answer ready, so the user gets that rather than an error.
+  let client: Anthropic;
+  try {
+    client = createClient(await loadSdk(), config);
+  } catch {
+    return {
+      text: agent.localAnswer(facts, state, clean),
+      agent,
+      toolCalls: [],
+      fellBackToLocal: true,
+      error: 'Could not load the AI advisor — the built-in specialist answered instead.',
+    };
+  }
+
   const tools = toolsFor(agent.tools);
   const system = buildSystemPrompt(
     agent,
@@ -312,23 +373,28 @@ function combineSignals(a: AbortSignal | undefined, b: AbortSignal): AbortSignal
  * rate limited" into the same unhelpful message.
  */
 export function describeError(error: unknown): string {
-  if (error instanceof Anthropic.AuthenticationError) {
-    return 'That API key was rejected. Check it in Settings, or switch back to the built-in advisor.';
-  }
-  if (error instanceof Anthropic.PermissionDeniedError) {
-    return 'That key does not have access to this model. Try a different model in Settings.';
-  }
-  if (error instanceof Anthropic.RateLimitError) {
-    return 'Rate limited by the API. Wait a moment and ask again.';
-  }
-  if (error instanceof Anthropic.BadRequestError) {
-    return `The API rejected the request: ${error.message}`;
-  }
-  if (error instanceof Anthropic.APIConnectionError) {
-    return 'Could not reach the API — check your connection. The built-in advisor answered instead.';
-  }
-  if (error instanceof Anthropic.APIError) {
-    return `API error ${error.status}: ${error.message}`;
+  // The error classes are values, so they are only reachable once the SDK has
+  // loaded. Any error worth describing came from an SDK call, which means it
+  // had loaded — but the guard keeps this honest rather than assuming.
+  if (sdk) {
+    if (error instanceof sdk.default.AuthenticationError) {
+      return 'That API key was rejected. Check it in Settings, or switch back to the built-in advisor.';
+    }
+    if (error instanceof sdk.default.PermissionDeniedError) {
+      return 'That key does not have access to this model. Try a different model in Settings.';
+    }
+    if (error instanceof sdk.default.RateLimitError) {
+      return 'Rate limited by the API. Wait a moment and ask again.';
+    }
+    if (error instanceof sdk.default.BadRequestError) {
+      return `The API rejected the request: ${error.message}`;
+    }
+    if (error instanceof sdk.default.APIConnectionError) {
+      return 'Could not reach the API — check your connection. The built-in advisor answered instead.';
+    }
+    if (error instanceof sdk.default.APIError) {
+      return `API error ${error.status}: ${error.message}`;
+    }
   }
   if (error instanceof Error && error.name === 'AbortError') return 'Cancelled.';
   return error instanceof Error ? error.message : 'Something went wrong.';

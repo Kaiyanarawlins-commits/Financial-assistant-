@@ -17,6 +17,7 @@ import { MoneyView } from './components/MoneyView';
 import { PlanView } from './components/PlanView';
 import { AdvisorView } from './components/AdvisorView';
 import { BusinessView } from './components/BusinessView';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { SettingsView } from './components/SettingsView';
 import { ExpenseSheet, type ExpenseDraft } from './components/forms';
 import {
@@ -202,21 +203,28 @@ function Shell({ session, onSignOut }: { session: Session; onSignOut: () => void
       </header>
 
       <main className="app__main">
-        {tab === 'dashboard' && <Greeting name={session.account.name} reference={reference} />}
-        {tab === 'dashboard' && (
-          <Dashboard reference={reference} onEditExpense={(id) => setExpenseSheet({ id })} />
-        )}
-        {tab === 'money' && (
-          <MoneyView
-            reference={reference}
-            onEditExpense={(id) => setExpenseSheet({ id })}
-            onAddExpense={() => setExpenseSheet({})}
-          />
-        )}
-        {tab === 'plan' && <PlanView reference={reference} />}
-        {tab === 'business' && <BusinessView reference={reference} />}
-        {tab === 'advisor' && <AdvisorView reference={reference} />}
-        {tab === 'settings' && <SettingsView reference={reference} session={session} onSignOut={onSignOut} />}
+        {/* Scoped to the tab, so a crash in one view costs that view rather
+            than the whole session — the shell and nav stay usable, and
+            switching tabs clears it via resetKey. */}
+        <ErrorBoundary scope="view" resetKey={tab} label={TABS.find((t) => t.id === tab)?.label}>
+          {tab === 'dashboard' && <Greeting name={session.account.name} reference={reference} />}
+          {tab === 'dashboard' && (
+            <Dashboard reference={reference} onEditExpense={(id) => setExpenseSheet({ id })} />
+          )}
+          {tab === 'money' && (
+            <MoneyView
+              reference={reference}
+              onEditExpense={(id) => setExpenseSheet({ id })}
+              onAddExpense={() => setExpenseSheet({})}
+            />
+          )}
+          {tab === 'plan' && <PlanView reference={reference} />}
+          {tab === 'business' && <BusinessView reference={reference} />}
+          {tab === 'advisor' && <AdvisorView reference={reference} />}
+          {tab === 'settings' && (
+            <SettingsView reference={reference} session={session} onSignOut={onSignOut} />
+          )}
+        </ErrorBoundary>
       </main>
 
       <nav className="nav" aria-label="Sections">

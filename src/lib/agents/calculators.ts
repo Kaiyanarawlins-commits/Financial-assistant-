@@ -311,6 +311,22 @@ const SCENARIO_CUES: RegExp[] = [
   // "how long would it take me to save 10k" is a scenario even with no "if".
   /\bhow long (?:would|will|does|do|is it going to)\b/i,
   /\bhow (?:long|many months|many years)\b.{0,40}\b(?:take|reach|save|pay off|clear)\b/i,
+
+  // Prospective intent. The cues above all describe a *supposition* ("what if",
+  // "suppose"), and people far more often describe a plan: "I want to take out
+  // a 5k loan at 5%, what would I pay back?" is a scenario question in every
+  // sense that matters, and reading it as a question about stored data is how
+  // it came back as a summary of debts the user never asked about.
+  /\b(?:i|we)\s*(?:'m|’m| am| are|'re|’re)?\s*(?:want|wanna|plan|planning|think|thinking|consider|considering|looking|hoping|need|needed|about|going|gonna)\b.{0,24}\b(?:to|about|at|into)\b/i,
+  /\b(?:take|taking|took|get|getting|got)\s+(?:out\s+)?an?\b.{0,24}\b(?:loan|mortgage|finance|credit|advance|overdraft)\b/i,
+  /\b(?:borrow|borrowing|borrowed|refinance|refinancing|finance|financing)\b/i,
+  /\bif i (?:take|took|borrow|borrowed|buy|bought|sign|signed|open|opened)\b/i,
+
+  // "how much would I be paying back in total?" — a computation on figures the
+  // question itself supplies, with no "if" anywhere in it.
+  /\bhow much\b.{0,40}\b(?:would|will|do|does|should)\b.{0,30}\b(?:pay|paying|repay|owe|cost|costs|end up|be)\b/i,
+  /\b(?:what|how much)\b.{0,30}\b(?:total|in total|altogether|all in)\b/i,
+  /\bwhat would (?:the|my|that|a|an)\b.{0,30}\b(?:payment|repayment|cost|interest|total|monthly)\b/i,
 ];
 
 // ---------------------------------------------------------------------------

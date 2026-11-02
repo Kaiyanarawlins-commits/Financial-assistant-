@@ -13,6 +13,7 @@ import {
   estimateNetRange,
   isAssumptionAnswer,
   isUsableScenario,
+  loanPayment,
   parseFigures,
   parseRates,
   parseYears,
@@ -25,6 +26,7 @@ import {
 import { buildFacts, simulateMonthlyChange, type AdvisorFacts } from './facts';
 import {
   emptyMemory,
+  entitiesIn,
   formatMemory,
   rememberAnswer,
   rememberQuestion,
@@ -46,7 +48,7 @@ export * from './guardrails';
 export * from './conversation';
 export * from './conversational';
 export * from './glossary';
-export { isConfigured, describeError } from './claude';
+export { isConfigured, describeError, warmSdk } from './claude';
 export type { AgentReply, ClaudeConfig, ModelId, ToolCallRecord } from './claude';
 
 const m = (cents: number) => formatMoney(cents);
@@ -185,16 +187,26 @@ function answerLocally(
   const blocked = screenQuestion(question);
   if (blocked) return blocked.text;
 
-  if (isHypothetical(question)) {
+  // Two ways to recognise a question that must be answered from its own
+  // figures. The cue list is the fast path; `carriesOwnFigures` is the backstop,
+  // and it exists because the cue list has now been wrong twice in exactly the
+  // same expensive way. "I want to take out a 5k loan at 5%, what would I pay
+  // back?" matched no cue, so the guard below never ran and the Debt Strategist
+  // answered with a summary of debts the user had not asked about.
+  //
+  // The backstop asks a question the cue list cannot: are these figures the
+  // user's own? A number that appears nowhere in their stored data was supplied
+  // by the question, and a question supplying its own numbers is never asking
+  // about the ledger.
+  if (isHypothetical(question) || carriesOwnFigures(question, facts)) {
     const scenario = answerHypothetically(question, facts);
     if (scenario) return scenario;
 
-    // The question is a scenario carrying the user's own figures, and nothing
-    // here could price it. Falling through to the specialist would answer with
-    // the *stored* data instead — which is how "if I make 5k and spend 1.5k"
-    // came back quoting a $6,800 income the user never mentioned. Saying what
-    // was understood is worth far more than a confident answer to a different
-    // question.
+    // Nothing here could price it. Falling through to the specialist would
+    // answer with the *stored* data instead — which is how "if I make 5k and
+    // spend 1.5k" came back quoting a $6,800 income the user never mentioned.
+    // Saying what was understood is worth far more than a confident answer to a
+    // different question.
     if (parseFigures(question).length > 0) {
       return unpricedScenario(question);
     }
@@ -208,7 +220,81 @@ function answerLocally(
     if (followUp) return makeConversational(followUp, memory, agent.id, true);
   }
 
+  // The question named one of the user's own accounts, goals or categories, and
+  // no specialist matched strongly enough to claim it — "why is my Visa balance
+  // costing so much?" carries no routing keyword at all. Triage would answer it
+  // with a general position summary, which is a worse reply than the detail on
+  // the thing they actually named. Scoped to triage on purpose: a question that
+  // did reach a specialist is already in better hands, and firing on every
+  // mention is what once turned "how big should my emergency fund be?" into a
+  // balance readout for the goal of that name.
+  if (agent.id === 'triage') {
+    const named = entitiesIn(question, state)[0];
+    if (named) {
+      const detail = entityDetail(named, facts);
+      if (detail) return makeConversational(detail, memory, agent.id, isFollowUp);
+    }
+  }
+
   return makeConversational(agent.localAnswer(facts, state, question), memory, agent.id, isFollowUp);
+}
+
+/** Interrogatives that ask for a figure to be worked out rather than looked up. */
+const ASKS_FOR_A_CALCULATION =
+  /\b(?:how much|how long|how many|what would|what will|what'?s the|whats the|total|in total|altogether|work out|calculate|end up)\b/i;
+
+/** Cents of slack when deciding whether a figure came from the user's own data. */
+const FIGURE_MATCH_TOLERANCE = 100;
+
+/**
+ * Whether the question supplies its own numbers rather than referring to stored ones.
+ *
+ * The test is deliberately not "does this sound hypothetical" — that is the
+ * judgement the cue list already makes, and the whole point of this function is
+ * to catch the cases it misses. Instead it asks whether the figures in the
+ * question can be found in the user's data at all. "Why is my $3,400 Visa so
+ * expensive?" quotes a balance the app knows, so it is a question about the
+ * ledger. "A 5k loan at 5%" quotes a number that appears nowhere in it, so it
+ * cannot be.
+ *
+ * Both conditions are required: a stray figure in a browsing question should
+ * not hijack the specialist, so the question must also be asking for something
+ * to be computed.
+ */
+function carriesOwnFigures(question: string, facts: AdvisorFacts): boolean {
+  const figures = parseFigures(question);
+  if (figures.length === 0) return false;
+  if (!ASKS_FOR_A_CALCULATION.test(question)) return false;
+
+  const known = knownAmounts(facts);
+  return figures.some(
+    (figure) =>
+      !known.some((amount) => Math.abs(amount - figure.cents) <= FIGURE_MATCH_TOLERANCE),
+  );
+}
+
+/** Every monetary amount the user's own data contains, for the test above. */
+function knownAmounts(facts: AdvisorFacts): number[] {
+  const c = facts.cashflow;
+  return [
+    c.incomeCents,
+    c.spentCents,
+    c.recurringCents,
+    c.oneTimeCents,
+    c.remainingBalanceCents,
+    c.safeToSpendCents,
+    facts.debt.totalCents,
+    facts.debt.minimumsCents,
+    facts.debt.monthlyInterestCents,
+    facts.emergencyFund.monthlyEssentialsCents,
+    ...facts.debt.items.flatMap((d) => [
+      d.balanceCents,
+      d.minimumPaymentCents,
+      d.creditLimitCents ?? 0,
+    ]),
+    ...facts.goals.flatMap((g) => [g.targetCents, g.savedCents, g.remainingCents]),
+    ...facts.categories.map((category) => category.spentCents),
+  ].filter((amount) => amount > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +350,84 @@ function answerHypothetically(question: string, facts: AdvisorFacts): string | n
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  // --- Borrowing: what a loan actually costs ---------------------------------
+  // Checked before the payoff branch below, which assumes an existing balance
+  // and a payment the user already makes. "I want to take out a 5k loan at 5%"
+  // is the opposite situation: nothing is owed yet, there is no payment, and
+  // the question is what the borrowing costs.
+  if (
+    containsAny(q, ['loan', 'borrow', 'borrowing', 'finance', 'financing', 'refinance', 'lend']) &&
+    !containsAny(q, ['student loan forgiveness'])
+  ) {
+    const principal = largest.cents;
+    const rate = rates[0] ?? null;
+    const term = years;
+
+    if (rate === null) {
+      return [
+        `I can price **${m(principal)}** of borrowing exactly, but not without the rate — at a typical spread it is the difference between paying back ${m(principal + Math.round(principal * 0.1))} and ${m(principal + Math.round(principal * 0.45))}, so guessing it would be worse than asking.`,
+        '',
+        `Tell me the APR and the term and I will give you the monthly payment, the total repaid and the interest. If you only know one of them, say which and I will show the other across a sensible range.`,
+      ].join('\n');
+    }
+
+    // A term changes the answer more than the rate does, so when it is missing
+    // the honest reply is the shape of the trade-off rather than one number
+    // computed from an assumption the user never made.
+    const terms = term !== null ? [term] : [1, 2, 3, 5];
+    const rows = terms.map((yearsForRow) => {
+      const months = Math.max(1, Math.round(yearsForRow * 12));
+      const payment = loanPayment(principal, rate, months);
+      const total = payment * months;
+      return { years: yearsForRow, months, payment, total, interest: total - principal };
+    });
+
+    const lines: string[] = [];
+
+    if (term !== null) {
+      const only = rows[0]!;
+      lines.push(
+        `**${m(only.total)} in total** — ${m(principal)} borrowed plus **${m(only.interest)}** of interest.`,
+        '',
+        `At ${p(rate, 2)} over ${formatMonths(only.months)}, that is **${m(only.payment)} a month**.`,
+      );
+    } else {
+      lines.push(
+        `That depends entirely on the term, which you have not said — so here it is across the usual ones. **${m(principal)} at ${p(rate, 2)}:**`,
+        '',
+      );
+      for (const row of rows) {
+        lines.push(
+          `- **${row.years} ${row.years === 1 ? 'year' : 'years'}**: ${m(row.payment)}/mo — **${m(row.total)}** back in total, ${m(row.interest)} of it interest`,
+        );
+      }
+      const shortest = rows[0]!;
+      const longest = rows.at(-1)!;
+      lines.push('');
+      lines.push(
+        `Stretching it from ${shortest.years} to ${longest.years} years drops the payment by ${m(shortest.payment - longest.payment)} a month and costs **${m(longest.interest - shortest.interest)} more** in interest. That is the whole trade, and it is why the term matters more than shaving a point off the rate.`,
+      );
+    }
+
+    lines.push('');
+    lines.push(
+      `Principal and interest only — this excludes any arrangement or origination fee, which on a personal loan is commonly 1–8% of the amount and is often deducted from what actually reaches you. Ask the lender for the **APR**, not the interest rate: the APR has those fees folded in, which is what makes two offers comparable.`,
+    );
+
+    if (facts.debt.totalCents > 0) {
+      lines.push('');
+      lines.push(
+        `Against your own position: you already carry ${m(facts.debt.totalCents)} at ${p(facts.debt.blendedAprPercent, 2)} blended. ${
+          rate < facts.debt.blendedAprPercent
+            ? `At ${p(rate, 2)} this new borrowing would be *cheaper* than what you already pay, so it is worth asking whether it should be replacing some of that rather than adding to it.`
+            : `At ${p(rate, 2)} it would be dearer than your existing average, so it adds to the cost of your overall position rather than diluting it.`
+        }`,
+      );
+    }
+
+    return lines.join('\n');
   }
 
   // --- Investment growth -----------------------------------------------------

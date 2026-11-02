@@ -8,7 +8,7 @@ The name is the thesis: a compass gives direction, and this app's job is to show
 ```bash
 npm install
 npm run dev               # http://localhost:5173
-npm test                  # 259 tests over the engine, agents, accounting, guardrails and auth
+npm test                  # 269 tests over the engine, agents, accounting, guardrails and auth
 npm run build             # typecheck + production bundle
 npm run build:standalone  # everything inlined into one portable HTML file
 ```
@@ -179,6 +179,25 @@ matter how often the calculation runs, and no background job is needed to roll t
 Hand-rolled SVG — donut, trend bars, per-category trend, net-worth line. Four small purpose-built charts cost less
 than a charting library here: no bundle weight, no fighting a theme system, and they inherit the app's CSS variables
 so light and dark mode work for free.
+
+---
+
+## Resilience and load
+
+**Crash recovery.** `src/components/ErrorBoundary.tsx` wraps the app at the root and each tab
+separately. A crash in one view leaves the shell and navigation alive and clears when you switch
+tabs; a crash below that says plainly that the data is still on the device and offers to download it
+before reloading. The download reads the raw stored string with no parse, no serializer and no
+import from the app's own modules — a boundary that needs the broken program to work is not a
+boundary — and the button only appears when there is something stored, so the reassurance is never
+a bluff.
+
+**The SDK is a lazy chunk.** `claude.ts` imports `@anthropic-ai/sdk` for types only and fetches the
+runtime copy on first use. The default advisor backend is `local`, so most sessions never load it:
+the entry bundle is **443 kB (140 kB gzipped)** against 605 kB (185 kB) when it was static, and a
+full signed-in session driving the local advisor fetches exactly one JS file. `warmSdk()` starts the
+fetch when the advisor opens with a model backend configured, so opting in costs no perceptible
+latency.
 
 ---
 
@@ -461,14 +480,14 @@ applies unchanged here.
 
 ## Testing
 
-259 tests, all against the pure modules:
+269 tests, all against the pure modules:
 
 ```
 finance.test.ts   45  balance maths, recurring expansion, idempotency, month-length
                       clamping, leap years, safe-to-spend, buffer mode, cash-on-hand
                       anchoring, income schedules, irregular income, categories,
                       trends, reminders
-agents.test.ts   138  facts, routing, calculators, figure parsing, guardrails,
+agents.test.ts   147  facts, routing, calculators, figure parsing, guardrails,
                       tool execution, specialist answers, hypotheticals,
                       conversation memory, scenario refinement, numeric
                       verification, chat history, the conversational layer,

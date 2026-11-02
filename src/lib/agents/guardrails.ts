@@ -35,8 +35,21 @@ const NAMED_ASSET =
 
 const GUARANTEE = /\b(guarantee|guaranteed|risk[- ]free|sure thing|can'?t lose|no risk|certain return)\b/i;
 
+/**
+ * Individual tax and legal questions, which belong to a CPA or an attorney.
+ *
+ * "will" and "trust" are kept out of the main list and handled separately
+ * below. Both have an everyday sense that swamps the legal one: listing a bare
+ * `will` here refused "I will save $500 a month" and "what will it cost me?" as
+ * estate-planning questions, which is most sentences anyone writes about money
+ * in the future tense. Requiring a determiner — *a* will, *a* trust — keeps the
+ * legal reading and drops the auxiliary verb.
+ */
 const INDIVIDUAL_TAX_LEGAL =
-  /\b(my|our|i)\b.{0,40}\b(taxes|tax return|deduct|deduction|write[- ]?off|audit|itemi[sz]e|will|trust|probate|lawsuit|sue|bankruptcy|chapter 7|chapter 13)\b/i;
+  /\b(my|our|i)\b.{0,40}\b(taxes|tax return|deduct|deduction|write[- ]?off|audit|itemi[sz]e|probate|lawsuit|sue|bankruptcy|chapter 7|chapter 13)\b/i;
+
+const LEGAL_INSTRUMENT =
+  /\b(?:a|an|my|our|the|his|her|their)\s+(?:(?:last|living|revocable|irrevocable)\s+)?(?:will|trust|estate)\b(?!\s+(?:be|been|have|has|cost|costs|save|saves|pay|pays|get|gets|go|goes|make|makes|take|takes|need|needs|work|works|help|helps|run|runs|last|lasts|grow|grows|drop|drops|rise|rises))/i;
 
 /** Screens a question before it reaches a model. */
 export function screenQuestion(question: string): RefusalMatch | null {
@@ -46,7 +59,7 @@ export function screenQuestion(question: string): RefusalMatch | null {
   if (GUARANTEE.test(question)) {
     return { kind: 'guaranteed-return', text: refusalText('guaranteed-return') };
   }
-  if (INDIVIDUAL_TAX_LEGAL.test(question)) {
+  if (INDIVIDUAL_TAX_LEGAL.test(question) || LEGAL_INSTRUMENT.test(question)) {
     return { kind: 'individual-tax-legal', text: refusalText('individual-tax-legal') };
   }
   return null;
