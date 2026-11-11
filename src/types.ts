@@ -68,6 +68,13 @@ export interface ExpenseEntry {
    * recurring figure.
    */
   variable?: boolean;
+  /**
+   * Optional name for grouping bills on the Bills view. Unset falls back to the
+   * category, so the grouping is useful before anyone has filed anything by
+   * hand, and a custom name is for the cases a category cannot express — "the
+   * flat" covering rent, council tax and contents insurance at once.
+   */
+  billGroup?: string;
   active: boolean;
   createdAt: ISODate;
 }

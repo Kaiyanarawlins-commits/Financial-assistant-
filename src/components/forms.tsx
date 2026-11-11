@@ -71,16 +71,20 @@ export interface ExpenseDraft {
   dueDay?: number;
   date?: string;
   variable?: boolean;
+  billGroup?: string;
 }
 
 export function ExpenseSheet({
   categories,
+  groups = [],
   initial,
   onSave,
   onDelete,
   onClose,
 }: {
   categories: Category[];
+  /** Bill group names already in use, offered as suggestions. */
+  groups?: string[];
   initial?: ExpenseEntry;
   onSave: (draft: ExpenseDraft) => void;
   onDelete?: () => void;
@@ -93,6 +97,7 @@ export function ExpenseSheet({
   const [dueDay, setDueDay] = useState(String(initial?.dueDay ?? 1));
   const [date, setDate] = useState(initial?.date ?? today());
   const [variable, setVariable] = useState(Boolean(initial?.variable));
+  const [billGroup, setBillGroup] = useState(initial?.billGroup ?? '');
 
   const amountCents = toCents(amount);
   const valid = amountCents > 0;
@@ -105,7 +110,7 @@ export function ExpenseSheet({
       categoryId,
       recurrence,
       ...(recurrence === 'recurring'
-        ? { dueDay: clampDay(dueDay), variable }
+        ? { dueDay: clampDay(dueDay), variable, billGroup: billGroup.trim() || undefined }
         : { date }),
     });
   };
@@ -202,6 +207,23 @@ export function ExpenseSheet({
                 <span className="faint"> — ask me to confirm before it posts</span>
               </span>
             </label>
+            <Field
+              label="Bill group (optional)"
+              hint="Groups this bill on the Bills view. Leave blank to group it by category."
+            >
+              <input
+                className="input"
+                list="bill-groups"
+                placeholder={defaultName(categories, categoryId)}
+                value={billGroup}
+                onChange={(event) => setBillGroup(event.target.value)}
+              />
+              <datalist id="bill-groups">
+                {groups.map((group) => (
+                  <option key={group} value={group} />
+                ))}
+              </datalist>
+            </Field>
           </>
         ) : (
           <Field label="Date">

@@ -11,6 +11,7 @@ import { setStorageNamespace } from './lib/storage';
 import { setChatNamespace } from './lib/chatHistory';
 import { clearMarketCache } from './lib/business/market';
 import { syncReminders } from './lib/push/client';
+import { existingGroups } from './lib/bills';
 import { today } from './lib/dates';
 import { pendingConfirmations, upcomingBills } from './lib/finance';
 import { Dashboard } from './components/Dashboard';
@@ -266,6 +267,7 @@ function Shell({ session, onSignOut }: { session: Session; onSignOut: () => void
       {expenseSheet && (
         <ExpenseSheet
           categories={state.categories}
+          groups={existingGroups(state)}
           initial={editing}
           onSave={saveExpense}
           onClose={() => setExpenseSheet(null)}

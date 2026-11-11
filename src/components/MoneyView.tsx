@@ -5,6 +5,7 @@ import { cycleKeyOf, formatShort, monthPeriod, paydaysInPeriod } from '../lib/da
 import { computeSnapshot } from '../lib/finance';
 import { formatMoney } from '../lib/money';
 import { IncomeSheet, type IncomeDraft } from './forms';
+import { BillsView } from './BillsView';
 import { Card, EmptyState, PlusIcon, Segmented } from './ui';
 import { LedgerRow } from './Dashboard';
 
@@ -25,7 +26,7 @@ export function MoneyView({
   onAddExpense: () => void;
 }) {
   const { state, dispatch } = useStore();
-  const [tab, setTab] = useState<'income' | 'expenses'>('income');
+  const [tab, setTab] = useState<'income' | 'bills' | 'expenses'>('income');
   const [editingIncome, setEditingIncome] = useState<string | null>(null);
   const [addingIncome, setAddingIncome] = useState(false);
 
@@ -53,6 +54,7 @@ export function MoneyView({
           onChange={setTab}
           options={[
             { value: 'income', label: 'Income' },
+            { value: 'bills', label: 'Bills' },
             { value: 'expenses', label: 'Expenses' },
           ]}
         />
@@ -66,7 +68,9 @@ export function MoneyView({
         </button>
       </div>
 
-      {tab === 'income' ? (
+      {tab === 'bills' ? (
+        <BillsView reference={reference} onEditExpense={onEditExpense} />
+      ) : tab === 'income' ? (
         <>
           <Card title={`${period.label} income`}>
             <div style={{ fontSize: 30, fontWeight: 750, letterSpacing: '-0.025em' }} className="tnum pos">

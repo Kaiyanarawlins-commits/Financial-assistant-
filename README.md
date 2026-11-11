@@ -8,7 +8,7 @@ The name is the thesis: a compass gives direction, and this app's job is to show
 ```bash
 npm install
 npm run dev               # http://localhost:5173
-npm test                  # 281 tests over the engine, agents, accounting, reminders and auth
+npm test                  # 300 tests over the engine, agents, accounting, bills and auth
 npm run build             # typecheck + production bundle
 npm run build:standalone  # everything inlined into one portable HTML file
 ```
@@ -179,6 +179,23 @@ matter how often the calculation runs, and no background job is needed to roll t
 Hand-rolled SVG — donut, trend bars, per-category trend, net-worth line. Four small purpose-built charts cost less
 than a charting library here: no bundle weight, no fighting a theme system, and they inherit the app's CSS variables
 so light and dark mode work for free.
+
+---
+
+## Bills
+
+**Money → Bills.** One screen for what you pay every month: the total, the next bill to land, what
+falls inside your reminder window, and every recurring bill grouped with a bar showing what each
+group costs you. Groups default to the expense's category, so the view is useful before anyone has
+filed anything by hand, and a bill can carry a custom group name for the cases a category cannot
+express — "the flat" covering rent, council tax and contents insurance at once.
+
+A group holding a single bill shows that bill's due date rather than the word "1 bill", because a
+row you have to expand to learn one date is not worth the tap. Variable bills can be confirmed in
+place, and the reminder toggle and lead time sit next to the bills rather than in Settings.
+
+This replaced three true-but-scattered views of the same subject: the dashboard's next few days, the
+Money tab's expense list, and a reminder switch six cards into Settings.
 
 ---
 
@@ -515,7 +532,7 @@ applies unchanged here.
 
 ## Testing
 
-281 tests, all against the pure modules:
+300 tests, all against the pure modules:
 
 ```
 finance.test.ts   45  balance maths, recurring expansion, idempotency, month-length
@@ -535,6 +552,8 @@ business.test.ts  41  depreciation schedules footing to the cent, salvage floors
                       drawdown, ticker validation, provider failure modes
 push.test.ts      12  reminder scheduling and grouping, lead times, what reaches the
                       server, VAPID key generation and JWT signing
+bills.test.ts     19  next due dates and month-end clamping, custom vs category
+                      grouping, group totals and ordering, the reminder window
 debt.test.ts       9  payoff simulation, strategy comparison, unpayable plans
 ```
 
