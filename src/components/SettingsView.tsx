@@ -20,6 +20,17 @@ import {
   saveAdvisorConfig,
   type AdvisorConfig,
 } from '../lib/advisorConfig';
+import {
+  availability,
+  describeAvailability,
+  disableReminders,
+  loadPushConfig,
+  requestPermission,
+  savePushConfig,
+  syncReminders,
+  type PushConfig,
+} from '../lib/push/client';
+import { buildReminders } from '../lib/push/schedule';
 import { AlertIcon, Card, Field, InfoIcon, PlusIcon, Segmented, Sheet, Toggle } from './ui';
 
 /** Settings: account, modes, categories and caps, data export and reset. */
@@ -158,24 +169,9 @@ export function SettingsView({
           checked={state.settings.businessMode}
           onChange={(businessMode) => dispatch({ type: 'settings/update', patch: { businessMode } })}
         />
-        <div style={{ padding: '12px 0 0' }}>
-          <Field label="Warn me this many days before a bill is due">
-            <select
-              className="select"
-              value={state.settings.reminderLeadDays}
-              onChange={(event) =>
-                dispatch({ type: 'settings/update', patch: { reminderLeadDays: Number(event.target.value) } })
-              }
-            >
-              {[1, 2, 3, 5, 7, 14].map((days) => (
-                <option key={days} value={days}>
-                  {days} {days === 1 ? 'day' : 'days'}
-                </option>
-              ))}
-            </select>
-          </Field>
-        </div>
       </Card>
+
+      <ReminderSettings reference={reference} />
 
       <Card
         title="Categories & spending caps"
@@ -373,6 +369,136 @@ export function SettingsView({
  * swaps the deterministic answers for open-ended reasoning over the same facts
  * and the same tools — the guardrails and the redaction apply either way.
  */
+/**
+ * Bill reminders.
+ *
+ * Three things have to be true before a notification can arrive, and the panel
+ * says which one is missing rather than offering a switch that silently does
+ * nothing. The server fields are here and not hidden because self-hosting the
+ * reminder server is the expected path: there is no CashCompass service to
+ * sign up to.
+ */
+function ReminderSettings({ reference }: { reference: string }) {
+  const { state, dispatch } = useStore();
+  const [config, setConfig] = useState<PushConfig>(loadPushConfig);
+  const [status, setStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const enabled = state.settings.billRemindersEnabled;
+  const state0 = availability(config);
+  const upcoming = buildReminders(
+    { ...state, settings: { ...state.settings, billRemindersEnabled: true } },
+    reference,
+  );
+
+  const persist = (next: PushConfig) => {
+    savePushConfig(next);
+    setConfig(next);
+  };
+
+  const turnOn = async () => {
+    setBusy(true);
+    setStatus(null);
+    try {
+      const after = await requestPermission(config);
+      dispatch({ type: 'settings/update', patch: { billRemindersEnabled: true } });
+      if (after !== 'ready') {
+        setStatus(describeAvailability(after));
+        return;
+      }
+      const result = await syncReminders(
+        { ...state, settings: { ...state.settings, billRemindersEnabled: true } },
+        reference,
+        config,
+      );
+      setStatus(
+        result.ok
+          ? `Scheduled ${result.scheduled} ${result.scheduled === 1 ? 'reminder' : 'reminders'}.`
+          : (result.error ?? 'Could not schedule reminders.'),
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const turnOff = async () => {
+    setBusy(true);
+    dispatch({ type: 'settings/update', patch: { billRemindersEnabled: false } });
+    await disableReminders(config);
+    setStatus(null);
+    setBusy(false);
+  };
+
+  return (
+    <Card title="Bill reminders">
+      <Toggle
+        label="Notify me when bills are due"
+        hint="Reminders always show on the dashboard. This also sends them to your device when the app is closed."
+        checked={enabled}
+        onChange={(next) => void (next ? turnOn() : turnOff())}
+      />
+
+      <div className="tiny faint" style={{ padding: '10px 0 2px' }}>
+        {busy ? 'Working…' : (status ?? describeAvailability(state0))}
+      </div>
+
+      <div style={{ padding: '12px 0 0' }}>
+        <Field label="Warn me this many days before a bill is due">
+          <select
+            className="select"
+            value={state.settings.reminderLeadDays}
+            onChange={(event) =>
+              dispatch({
+                type: 'settings/update',
+                patch: { reminderLeadDays: Number(event.target.value) },
+              })
+            }
+          >
+            {[1, 2, 3, 5, 7, 14].map((days) => (
+              <option key={days} value={days}>
+                {days} {days === 1 ? 'day' : 'days'}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+
+      {upcoming.length > 0 && (
+        <div className="tiny faint" style={{ marginTop: 10 }}>
+          Next up: <strong>{upcoming[0]!.title}</strong> — {upcoming[0]!.body}
+          {upcoming.length > 1 && `, and ${upcoming.length - 1} more scheduled.`}
+        </div>
+      )}
+
+      <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
+        <div className="grid-2">
+          <Field label="Reminder server">
+            <input
+              className="input"
+              placeholder="https://push.example.com"
+              value={config.serverUrl}
+              onChange={(event) => persist({ ...config, serverUrl: event.target.value.trim() })}
+            />
+          </Field>
+          <Field label="Server public key">
+            <input
+              className="input"
+              placeholder="B…"
+              value={config.publicKey}
+              onChange={(event) => persist({ ...config, publicKey: event.target.value.trim() })}
+            />
+          </Field>
+        </div>
+        <p className="tiny faint" style={{ marginTop: 8 }}>
+          Run <code className="code">server/push.mjs</code> and paste what it prints at startup. It
+          is told when to wake your phone and nothing else: no bill names, no amounts, no account.
+          The wording is stored on this device and read by the app when the notification fires.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
 function AdvisorSettings() {
   const [config, setConfig] = useState<AdvisorConfig>(() => loadAdvisorConfig());
 

@@ -8,7 +8,7 @@ The name is the thesis: a compass gives direction, and this app's job is to show
 ```bash
 npm install
 npm run dev               # http://localhost:5173
-npm test                  # 269 tests over the engine, agents, accounting, guardrails and auth
+npm test                  # 281 tests over the engine, agents, accounting, reminders and auth
 npm run build             # typecheck + production bundle
 npm run build:standalone  # everything inlined into one portable HTML file
 ```
@@ -179,6 +179,41 @@ matter how often the calculation runs, and no background job is needed to roll t
 Hand-rolled SVG — donut, trend bars, per-category trend, net-worth line. Four small purpose-built charts cost less
 than a charting library here: no bundle weight, no fighting a theme system, and they inherit the app's CSS variables
 so light and dark mode work for free.
+
+---
+
+## Bill reminders, and a server that is told nothing
+
+Reminders show on the dashboard with no setup. To have them reach you when the app is closed, run
+`server/push.mjs`, and the interesting part is how little it knows.
+
+The obvious implementation posts "Rent, $1,500, due Tuesday" to a server and has the server deliver
+that text. That would quietly break the promise every other part of this app keeps. So instead:
+
+- The client works out *when* to notify and sends the server a list of timestamps. Nothing else.
+- The push is sent with **no payload at all**, which is why `server/push.mjs` has no dependencies:
+  the aes128gcm encryption everyone writes exists to protect a payload, and there isn't one.
+- The notification's wording is written into IndexedDB on the device, and `public/sw.js` reads it
+  there when the wake arrives.
+
+The worst case for a breach of that subscription database is an attacker learning some anonymous
+browser endpoints and that their owners wanted waking at 9am on the 12th. No amounts, no bill names,
+no account, not even an email address. `sanitise()` is written as a whitelist rather than by
+deleting unwanted fields, and a test asserts that a client sending bill details gets them dropped.
+
+```bash
+node server/push.mjs --generate-keys     # once
+VAPID_PUBLIC_KEY=… VAPID_PRIVATE_KEY=… VAPID_SUBJECT=mailto:you@example.com \
+  ALLOWED_ORIGINS=https://your-app.example.com node server/push.mjs
+```
+
+Paste the server URL and public key into **Settings → Bill reminders**. One notification per day
+that has bills due, not one per bill: three separate buzzes on the first of the month is how someone
+turns notifications off for good.
+
+Worth saying plainly, because a judge will ask: on iPhone this only works once the app has been
+added to the home screen, since Safari allows notifications for installed web apps only. The panel
+says so rather than failing silently.
 
 ---
 
@@ -417,10 +452,10 @@ numbers are a known migraine and vestibular trigger, and the figure *is* the con
 | Household mode | Partial — relabels the UI; no multi-user sync |
 | Business mode — depreciation, inflation, break-even, margins | Yes — four methods, schedules that foot to the cent |
 | Stock prices and study metrics | Yes, with your own free API key — see below |
-| Bill due-date reminders | In-app only — push needs a service worker and a server |
+| Bill due-date reminders | Yes — on the dashboard, and pushed to the device with `server/push.mjs` |
 | Bank/card sync | Not implemented — needs an aggregator (Plaid or similar) and a backend |
 
-The last two are honest gaps rather than oversights: both require infrastructure this build does not have.
+Bank sync is an honest gap rather than an oversight: it requires an aggregator and a company behind it.
 
 ---
 
@@ -480,7 +515,7 @@ applies unchanged here.
 
 ## Testing
 
-269 tests, all against the pure modules:
+281 tests, all against the pure modules:
 
 ```
 finance.test.ts   45  balance maths, recurring expansion, idempotency, month-length
@@ -498,6 +533,8 @@ business.test.ts  41  depreciation schedules footing to the cent, salvage floors
                       Fisher real rates, CPI restatement, break-even, margin vs.
                       markup, NPV/IRR/payback, moving averages, volatility,
                       drawdown, ticker validation, provider failure modes
+push.test.ts      12  reminder scheduling and grouping, lead times, what reaches the
+                      server, VAPID key generation and JWT signing
 debt.test.ts       9  payoff simulation, strategy comparison, unpayable plans
 ```
 

@@ -200,6 +200,12 @@ export interface Settings {
   irregularLookbackMonths: number;
   /** Days of warning before a bill is due. */
   reminderLeadDays: number;
+  /**
+   * Whether bill reminders are pushed to the device rather than only shown in
+   * the app. Off until the user turns it on and grants permission, because a
+   * notification prompt on first run is the fastest way to be denied forever.
+   */
+  billRemindersEnabled: boolean;
   /** Household mode simply relabels the UI for a shared budget. */
   householdMode: boolean;
   /**

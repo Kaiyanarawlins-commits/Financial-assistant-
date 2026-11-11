@@ -39,6 +39,7 @@ export function emptyState(): AppState {
       irregularIncomeMode: false,
       irregularLookbackMonths: 3,
       reminderLeadDays: 3,
+      billRemindersEnabled: false,
       householdMode: false,
       businessMode: false,
       theme: 'system',

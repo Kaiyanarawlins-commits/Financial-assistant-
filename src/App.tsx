@@ -10,6 +10,7 @@ import {
 import { setStorageNamespace } from './lib/storage';
 import { setChatNamespace } from './lib/chatHistory';
 import { clearMarketCache } from './lib/business/market';
+import { syncReminders } from './lib/push/client';
 import { today } from './lib/dates';
 import { pendingConfirmations, upcomingBills } from './lib/finance';
 import { Dashboard } from './components/Dashboard';
@@ -157,6 +158,19 @@ function Shell({ session, onSignOut }: { session: Session; onSignOut: () => void
   useEffect(() => {
     if (tab === 'business' && !state.settings.businessMode) setTab('dashboard');
   }, [tab, state.settings.businessMode]);
+
+  // Keep the scheduled reminders in step with the bills. Debounced because
+  // every keystroke in an expense form is a state change, and the useful moment
+  // is when the user has finished, not while they are typing. The sync is
+  // best-effort: a reminder that fails to schedule must never interrupt the
+  // thing the user was actually doing.
+  useEffect(() => {
+    if (!state.settings.billRemindersEnabled) return;
+    const timer = window.setTimeout(() => {
+      void syncReminders(state, reference).catch(() => undefined);
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [state, reference]);
 
   const editing = expenseSheet?.id ? state.expenses.find((e) => e.id === expenseSheet.id) : undefined;
 
