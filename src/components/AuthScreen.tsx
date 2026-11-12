@@ -275,7 +275,7 @@ function Welcome({ onCreate, onSignIn }: { onCreate: () => void; onSignIn: () =>
           <CheckIcon size={15} /> A safe-to-spend figure that accounts for the bills still to land
         </li>
         <li>
-          <CheckIcon size={15} /> Seven financial specialists that answer from your real numbers
+          <CheckIcon size={15} /> Eight financial specialists that answer from your real numbers
         </li>
         <li>
           <CheckIcon size={15} /> Your data stays on your device — no bank connection required

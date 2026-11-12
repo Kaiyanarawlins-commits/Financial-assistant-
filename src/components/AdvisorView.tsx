@@ -122,7 +122,7 @@ const SUGGESTIONS = [
 const INTRO_MESSAGE: Message = {
   id: 0,
   role: 'bot',
-  text: `I'm a team of seven specialists. Ask a question and whichever one owns it answers, using your real numbers — not a general explanation.
+  text: `I'm a team of eight specialists. Ask a question and whichever one owns it answers, using your real numbers — not a general explanation.
 
 I can also run hypotheticals: salaries you don't earn yet, houses you haven't bought, investments you haven't made. Give me the figures and I'll do the arithmetic.
 
@@ -473,7 +473,7 @@ function TeamPanel({ reference }: { reference: string }) {
   return (
     <div className="stack" style={{ gap: 10 }}>
       <p className="small muted">
-        Seven specialists. Whichever one owns your question answers it — you never have to pick.
+        Eight specialists. Whichever one owns your question answers it — you never have to pick.
       </p>
       {AGENT_LIST.filter((agent) => agent.id !== 'triage').map((agent) => (
         <div key={agent.id} className="card agent-card" style={{ borderLeftColor: agent.color }}>

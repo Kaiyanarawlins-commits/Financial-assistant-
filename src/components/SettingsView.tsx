@@ -514,7 +514,7 @@ function AdvisorSettings() {
     <Card title="AI advisor">
       <div className="row row--between row--wrap" style={{ gap: 10, marginBottom: 12 }}>
         <span className="grow small muted" style={{ minWidth: 170 }}>
-          Seven specialists answer either way. This chooses what powers them.
+          Eight specialists answer either way. This chooses what powers them.
         </span>
         <Segmented
           ariaLabel="Advisor engine"
