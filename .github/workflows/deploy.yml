@@ -36,10 +36,28 @@ jobs:
       # worth spending 30 seconds of CI on.
       - run: npm test
 
+      # Where the site is served from decides the asset base, and the answer is
+      # not always "/<repo>/". Three cases, all of which this project may hit:
+      #
+      #   kaiyanarawlins-commits.github.io/CashCompass/  -> /CashCompass/
+      #   cashcompass.github.io            (repo *.github.io) -> /
+      #   cashcompass.app                  (public/CNAME)     -> /
+      #
+      # Getting this wrong does not fail the build. It publishes a site that
+      # serves a white page and 404s every asset, which is a worse way to find
+      # out, so the base is computed rather than assumed.
+      - id: base
+        run: |
+          repo='${{ github.event.repository.name }}'
+          base="/$repo/"
+          case "$repo" in *.github.io) base="/" ;; esac
+          if [ -f public/CNAME ]; then base="/"; fi
+          echo "path=$base" >> "$GITHUB_OUTPUT"
+          echo "Serving from $base"
+
       - run: npm run build
         env:
-          # Pages serves this repo from /Financial-assistant-/, not the root.
-          VITE_BASE: /${{ github.event.repository.name }}/
+          VITE_BASE: ${{ steps.base.outputs.path }}
 
       # Single-page app: Pages has no rewrite rules, so a deep link or a reload
       # on any path would 404. Serving the same document as 404.html makes the
