@@ -46,16 +46,15 @@ jobs:
       # client-side app handle those instead.
       - run: cp dist/index.html dist/404.html
 
-      # Create the Pages site from here if it does not exist yet, rather than
-      # asking someone to find Settings → Pages → Source: "GitHub Actions".
+      # One-time setup, done by hand: Settings → Pages → Source: "GitHub Actions".
       #
-      # An earlier comment here claimed GITHUB_TOKEN cannot do this. On a public
-      # repository with `pages: write` in the job's permissions, which this job
-      # has, it can. If it ever cannot, the failure is the same one the repo
-      # already had, so trying costs nothing.
+      # `enablement: true` does not work here, and this is not a guess: run 15
+      # on 2026-11-13 tried it on this public repo with `pages: write` already
+      # granted below, and the API answered "Create Pages site failed. Error:
+      # Resource not accessible by integration". GITHUB_TOKEN can publish to a
+      # Pages site that exists; it cannot bring one into being. Asking for it
+      # only replaces a clear "enable Pages" error with a murkier one.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
