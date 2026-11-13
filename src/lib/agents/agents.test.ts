@@ -1,0 +1,1232 @@
+import { describe, expect, it } from 'vitest';
+import type { AppState } from '../../types';
+import { seedState } from '../seed';
+import {
+  affordability,
+  isHypothetical,
+  parseFigures,
+  parseRates,
+  parseYears,
+  payoffTime,
+  projectGrowth,
+  detectAssumptions,
+  readSavingsScenario,
+  retirementTarget,
+  timeToTarget,
+} from './calculators';
+import { buildFacts, formatFactSheet, simulateMonthlyChange } from './facts';
+import { screenAnswer, screenQuestion } from './guardrails';
+import { route } from './router';
+import { containsTerm } from './matching';
+import { AGENTS, AGENT_LIST, buildSystemPrompt } from './roster';
+import { executeTool, toolsFor } from './tools';
+import { askLocally } from './index';
+import {
+  emptyMemory,
+  formatMemory,
+  rememberAnswer,
+  rememberQuestion,
+  resolveReferences,
+  withDefinition,
+} from './conversation';
+import { termsIn } from './glossary';
+import { cautionFor, correctionPrompt, extractFigures, verifyAnswer } from './verify';
+import { formatMoney } from '../money';
+import { newConversation, titleFrom } from '../chatHistory';
+import { acknowledgement, trimRepetition } from './conversational';
+import { checkPassword, isValidEmail, normaliseEmail } from '../auth/crypto';
+
+const REFERENCE = '2026-08-15';
+
+function demo(): AppState {
+  // The seed carries credit limits on its revolving accounts, so utilization is
+  // computable out of the box.
+  return seedState(REFERENCE);
+}
+
+// ---------------------------------------------------------------------------
+
+describe('facts', () => {
+  const facts = buildFacts(demo(), REFERENCE);
+
+  it('computes cash flow with a fixed/discretionary split', () => {
+    expect(facts.cashflow.incomeCents).toBeGreaterThan(0);
+    expect(facts.cashflow.recurringCents + facts.cashflow.oneTimeCents).toBe(facts.cashflow.spentCents);
+    expect(facts.cashflow.fixedShareOfIncomePercent).toBeGreaterThan(0);
+  });
+
+  it('computes per-account monthly interest', () => {
+    const visa = facts.debt.items.find((d) => d.name.startsWith('Visa'));
+    // $3,400 at 24.99% ≈ $70.81/mo
+    expect(visa?.monthlyInterestCents).toBe(Math.round((340_000 * 0.2499) / 12));
+  });
+
+  it('computes credit utilization only where a limit exists', () => {
+    const visa = facts.debt.items.find((d) => d.name.startsWith('Visa'));
+    const store = facts.debt.items.find((d) => d.name.startsWith('Store'));
+    const loan = facts.debt.items.find((d) => d.name.startsWith('Student'));
+
+    expect(visa?.utilizationPercent).toBeCloseTo(68, 0); // 3,400 / 5,000
+    expect(store?.utilizationPercent).toBeCloseTo(76.7, 1); // 920 / 1,200
+    // A term loan has no limit, so it must be excluded rather than counted as 100%.
+    expect(loan?.utilizationPercent).toBeUndefined();
+    // Overall spans only the revolving accounts: 4,320 / 6,200.
+    expect(facts.debt.overallUtilizationPercent).toBeCloseTo(69.7, 1);
+  });
+
+  it('sizes the emergency fund from essentials rather than income', () => {
+    expect(facts.emergencyFund.threeMonthTargetCents).toBe(facts.emergencyFund.monthlyEssentialsCents * 3);
+    // Entertainment and dining are not essentials, so essentials < total spend.
+    expect(facts.emergencyFund.monthlyEssentialsCents).toBeLessThan(facts.cashflow.spentCents);
+  });
+
+  it('renders a fact sheet carrying the real figures', () => {
+    const sheet = formatFactSheet(facts);
+    expect(sheet).toContain('CASH FLOW');
+    expect(sheet).toContain('DEBT:');
+    expect(sheet).toContain('EMERGENCY FUND');
+    expect(sheet).toMatch(/\$[\d,]+\.\d{2}/);
+  });
+
+  it('flags an unanchored cash figure in the fact sheet', () => {
+    const state = demo();
+    state.settings.accountBalanceCents = undefined;
+    state.settings.accountBalanceAsOf = undefined;
+    expect(formatFactSheet(buildFacts(state, REFERENCE))).toContain('ESTIMATE');
+  });
+});
+
+describe('simulation', () => {
+  it('prices a monthly cut in savings rate and debt months', () => {
+    const state = demo();
+    const facts = buildFacts(state, REFERENCE);
+    const result = simulateMonthlyChange(state, facts, 10_000, 'cutting dining by $100');
+
+    expect(result.annualImpactCents).toBe(120_000);
+    expect(result.newSavingsRatePercent).toBeGreaterThan(facts.cashflow.savingsRatePercent);
+    expect(result.debtInterestSavedCents ?? 0).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('routing', () => {
+  const cases: [string, string][] = [
+    ['how do I raise my credit score?', 'credit'],
+    ['what is my utilization?', 'credit'],
+    ['should I use snowball or avalanche?', 'debt'],
+    ['how do I pay off my credit card debt?', 'debt'],
+    ['where did my money go this month?', 'budget'],
+    ['am I spending too much on groceries?', 'budget'],
+    ['how big should my emergency fund be?', 'savings'],
+    ['am I saving enough?', 'savings'],
+    ['explain index funds and ETFs', 'investing'],
+    ['how does a roth ira work?', 'investing'],
+    ['are my subscriptions worth it?', 'subscriptions'],
+    ['how do quarterly estimated taxes work?', 'tax'],
+    ['what house could I afford?', 'budget'],
+    ['what if I invested $400 a month at 7%?', 'investing'],
+    ['how do I calculate depreciation on my van?', 'business'],
+    ['what is straight line depreciation?', 'business'],
+    ['how does deflation differ from inflation?', 'business'],
+    ['how many units do I need to break even?', 'business'],
+    ['what is the difference between margin and markup?', 'business'],
+    ['what is the current share price of AAPL?', 'business'],
+  ];
+
+  for (const [question, expected] of cases) {
+    it(`routes "${question}" to ${expected}`, () => {
+      expect(route(question).agent.id).toBe(expected);
+    });
+  }
+
+  it('sends "credit card debt" to the debt strategist, not the credit coach', () => {
+    expect(route('help me with my credit card debt').agent.id).toBe('debt');
+  });
+
+  it('falls back to the generalist when nothing matches', () => {
+    expect(route('what is the airspeed velocity of a swallow?').agent.id).toBe('triage');
+  });
+
+  // Regression: the router matched keywords as bare substrings, so "airspeed"
+  // contained "irs" and sent a nonsense question to the Tax & Records Guide.
+  it('does not match a keyword hidden inside another word', () => {
+    expect(containsTerm('airspeed velocity', 'irs')).toBe(false);
+    expect(containsTerm('a classic car', 'ira')).toBe(false);
+    expect(containsTerm('the season ended', 'save')).toBe(false);
+    expect(route('what is the airspeed velocity of a swallow?').agent.id).toBe('triage');
+  });
+
+  // Regression: `\bterm\b` missed every inflection, so scenario questions fell
+  // through to a generic answer that looked plausible.
+  it('matches common word endings', () => {
+    expect(containsTerm('I invested last year', 'invest')).toBe(true);
+    expect(containsTerm('planning for retirement', 'retire')).toBe(true);
+    expect(containsTerm('I earned more', 'earn')).toBe(true);
+    expect(containsTerm('my savings account', 'saving')).toBe(true);
+    expect(containsTerm('paying off cards', 'pay')).toBe(true);
+  });
+
+  it('detects hypotheticals', () => {
+    expect(route('what if I earned $90,000?').hypothetical).toBe(true);
+    expect(route('could I afford a house?').hypothetical).toBe(true);
+    expect(route('where did my money go?').hypothetical).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('calculators', () => {
+  it('compounds monthly with contributions', () => {
+    const result = projectGrowth(0, 50_000, 7, 30);
+    // $500/mo at 7% for 30 years ≈ $566k–$614k depending on convention.
+    expect(result.futureValueCents).toBeGreaterThan(55_000_000);
+    expect(result.futureValueCents).toBeLessThan(65_000_000);
+    expect(result.contributedCents).toBe(50_000 * 360);
+    expect(result.growthCents).toBe(result.futureValueCents - result.contributedCents);
+    expect(result.yearlyBalancesCents).toHaveLength(30);
+  });
+
+  it('reports a payment that never clears a balance', () => {
+    const result = payoffTime(1_000_000, 24, 10_000); // $100/mo against $200/mo interest
+    expect(result.neverClears).toBe(true);
+    expect(result.months).toBe(Infinity);
+  });
+
+  it('computes payoff time and interest for a viable payment', () => {
+    const result = payoffTime(340_000, 24.99, 20_000);
+    expect(result.neverClears).toBe(false);
+    expect(result.months).toBeGreaterThan(12);
+    expect(result.totalInterestCents).toBeGreaterThan(0);
+  });
+
+  it('applies the 28/36 rule', () => {
+    const result = affordability(9_600_000, 84_000, 6.5, 30); // $96k/yr, $840/mo debt
+    expect(result.maxMonthlyHousingCents).toBe(Math.round((9_600_000 / 12) * 0.28));
+    expect(result.maxMonthlyAllDebtCents).toBe(Math.round((9_600_000 / 12) * 0.36));
+    expect(result.estimatedMaxLoanCents).toBeGreaterThan(0);
+    expect(result.assumptions.length).toBeGreaterThan(2);
+  });
+
+  it('reduces borrowing capacity when existing debt eats the 36% ceiling', () => {
+    const clean = affordability(9_600_000, 0);
+    const burdened = affordability(9_600_000, 250_000);
+    expect(burdened.estimatedMaxLoanCents).toBeLessThan(clean.estimatedMaxLoanCents);
+  });
+
+  it('computes time to a savings target', () => {
+    expect(timeToTarget(200_000, 20_000).months).toBe(10);
+    expect(timeToTarget(200_000, 0).neverReaches).toBe(true);
+    expect(timeToTarget(200_000, 20_000, 200_000).months).toBe(0);
+  });
+
+  it('applies the 4% rule', () => {
+    expect(retirementTarget(6_000_000, 4)).toBe(150_000_000);
+  });
+});
+
+describe('figure parsing', () => {
+  it('parses scaled amounts', () => {
+    expect(parseFigures('if I made $80k a year')[0]?.cents).toBe(8_000_000);
+    expect(parseFigures('a $1.2m house')[0]?.cents).toBe(120_000_000);
+    expect(parseFigures('$1,250.50')[0]?.cents).toBe(125_050);
+  });
+
+  it('marks annual figures', () => {
+    expect(parseFigures('$80k a year')[0]?.annual).toBe(true);
+    expect(parseFigures('$500 a month')[0]?.annual).toBe(false);
+  });
+
+  it('ignores bare small numbers that are not money', () => {
+    expect(parseFigures('over 30 years')).toHaveLength(0);
+    expect(parseFigures('at 7%')).toHaveLength(0);
+  });
+
+  it('parses rates and durations', () => {
+    expect(parseRates('at 6.5% over time')).toEqual([6.5]);
+    expect(parseYears('in 25 years')).toBe(25);
+    expect(parseYears('over 18 months')).toBe(1.5);
+  });
+
+  it('recognises hypothetical phrasing', () => {
+    expect(isHypothetical('what if I earned more')).toBe(true);
+    expect(isHypothetical("let's say I had $10,000")).toBe(true);
+    expect(isHypothetical('how much house can I afford')).toBe(true);
+    expect(isHypothetical('how much did I spend on groceries')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('guardrails', () => {
+  it('refuses a specific security recommendation', () => {
+    const hit = screenQuestion('should I buy Tesla stock?');
+    expect(hit?.kind).toBe('security-recommendation');
+  });
+
+  it('refuses a guaranteed-return question', () => {
+    expect(screenQuestion('what investment has guaranteed returns?')?.kind).toBe('guaranteed-return');
+  });
+
+  it('refuses individualized tax questions', () => {
+    expect(screenQuestion('can I deduct my home office on my taxes?')?.kind).toBe('individual-tax-legal');
+    expect(screenQuestion('I need to set up a trust for my kids')?.kind).toBe('individual-tax-legal');
+    expect(screenQuestion('do I need a will?')?.kind).toBe('individual-tax-legal');
+  });
+
+  it('does not read the future tense as an estate-planning question', () => {
+    // "will" and "trust" have everyday senses that swamp the legal ones. Listing
+    // them bare refused most sentences anyone writes about money in the future.
+    expect(screenQuestion('i will save 500 a month')).toBeNull();
+    expect(screenQuestion('i want to borrow 20000 for a car, what will it cost me?')).toBeNull();
+    expect(screenQuestion('how much will I have saved by June?')).toBeNull();
+    expect(screenQuestion('what will my balance be after rent?')).toBeNull();
+    expect(screenQuestion('I trust the numbers, but will I be short?')).toBeNull();
+  });
+
+  it('allows educational and hypothetical questions through', () => {
+    expect(screenQuestion('explain how index funds work')).toBeNull();
+    expect(screenQuestion('what if I invested $500 a month at 7%?')).toBeNull();
+    expect(screenQuestion('how do I build credit?')).toBeNull();
+  });
+
+  it('screens model output for recommendations and guarantees', () => {
+    expect(screenAnswer('You should buy bitcoin now')?.kind).toBe('security-recommendation');
+    expect(screenAnswer('this is a guaranteed return')?.kind).toBe('guaranteed-return');
+  });
+
+  it('does not block a legitimate educational answer that names asset classes', () => {
+    const educational =
+      'Index funds hold every company in a defined list. Bitcoin is volatile — drawdowns of 50–80% have happened repeatedly.';
+    expect(screenAnswer(educational)).toBeNull();
+  });
+
+  it('puts the hard rules in every specialist prompt', () => {
+    for (const agent of AGENT_LIST) {
+      const prompt = buildSystemPrompt(agent, 'FACTS', false);
+      expect(prompt).toContain('Never recommend buying, selling, or holding a specific security');
+      expect(prompt).toContain('Never guarantee or imply a guaranteed return');
+      expect(prompt).toContain('HYPOTHETICALS');
+      expect(prompt).toContain('FACTS');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('tools', () => {
+  const state = demo();
+
+  it('exposes a schema for every tool a specialist declares', () => {
+    for (const agent of AGENT_LIST) {
+      expect(toolsFor(agent.tools)).toHaveLength(agent.tools.length);
+    }
+  });
+
+  it('returns debt analysis in dollars, not cents', async () => {
+    const result = (await executeTool('get_debt_analysis', {}, state, REFERENCE)) as Record<string, number>;
+    // $22.72k of debt in the seed — a cents leak would read as millions.
+    expect(result.total_debt_dollars).toBeGreaterThan(1_000);
+    expect(result.total_debt_dollars).toBeLessThan(100_000);
+  });
+
+  it('returns category detail with transactions', async () => {
+    const result = (await executeTool('get_category_detail', { category_id: 'housing' }, state, REFERENCE)) as {
+      found: boolean;
+      spent_dollars: number;
+      transactions: unknown[];
+    };
+    expect(result.found).toBe(true);
+    expect(result.spent_dollars).toBe(1500);
+    expect(result.transactions.length).toBeGreaterThan(0);
+  });
+
+  it('filters transactions by category and amount', async () => {
+    const result = (await executeTool(
+      'list_transactions',
+      { min_amount_dollars: 400, limit: 5 },
+      state,
+      REFERENCE,
+    )) as { transactions: { amount_dollars: number }[] };
+    expect(result.transactions.every((t) => t.amount_dollars >= 400)).toBe(true);
+    expect(result.transactions.length).toBeLessThanOrEqual(5);
+  });
+
+  it('runs hypothetical arithmetic through calculate', async () => {
+    const result = (await executeTool(
+      'calculate',
+      { operation: 'compound_growth', monthly_dollars: 500, annual_rate_percent: 7, years: 30 },
+      state,
+      REFERENCE,
+    )) as { future_value_dollars: number; assumptions: string };
+    expect(result.future_value_dollars).toBeGreaterThan(500_000);
+    expect(result.assumptions).toMatch(/not guaranteed/i);
+  });
+
+  it('computes affordability through calculate', async () => {
+    const result = (await executeTool(
+      'calculate',
+      { operation: 'affordability', gross_annual_income_dollars: 96_000, existing_monthly_debt_dollars: 840 },
+      state,
+      REFERENCE,
+    )) as { max_monthly_housing_dollars: number };
+    expect(result.max_monthly_housing_dollars).toBeCloseTo(2240, 0);
+  });
+
+  it('produces a depreciation schedule through business_calculate', async () => {
+    const result = (await executeTool(
+      'business_calculate',
+      {
+        operation: 'depreciation',
+        method: 'straight-line',
+        cost_dollars: 32_000,
+        salvage_dollars: 4_000,
+        life_years: 8,
+      },
+      state,
+      REFERENCE,
+    )) as {
+      total_depreciation_dollars: number;
+      ending_book_value_dollars: number;
+      schedule: { depreciation_dollars: number }[];
+    };
+
+    expect(result.schedule).toHaveLength(8);
+    expect(result.total_depreciation_dollars).toBe(28_000);
+    expect(result.ending_book_value_dollars).toBe(4_000);
+  });
+
+  it('separates future cost from purchasing power in the inflation tool', async () => {
+    const result = (await executeTool(
+      'business_calculate',
+      { operation: 'inflation', amount_dollars: 100, annual_rate_percent: 3, years: 10 },
+      state,
+      REFERENCE,
+    )) as { future_cost_dollars: number; purchasing_power_dollars: number };
+
+    expect(result.future_cost_dollars).toBeCloseTo(134.39, 2);
+    expect(result.purchasing_power_dollars).toBeCloseTo(74.41, 2);
+  });
+
+  it('prices the asset register to the current year', async () => {
+    const result = (await executeTool('get_asset_register', {}, state, REFERENCE)) as {
+      count: number;
+      this_year_depreciation_dollars: number;
+      assets: { name: string; cost_dollars: number; book_value_dollars: number }[];
+    };
+
+    expect(result.count).toBe(state.assets.length);
+    expect(result.this_year_depreciation_dollars).toBeGreaterThan(0);
+    // Every asset has been in service for at least one year in the seed, so
+    // book value must have fallen below cost.
+    for (const asset of result.assets) {
+      expect(asset.book_value_dollars).toBeLessThan(asset.cost_dollars);
+    }
+  });
+
+  it('reports market data as unavailable rather than inventing a price', async () => {
+    const result = (await executeTool(
+      'get_market_data',
+      { symbol: 'AAPL' },
+      state,
+      REFERENCE,
+    )) as { available: boolean; reason: string; message?: string };
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toBe('no-provider');
+    expect(result.message).toMatch(/from memory/i);
+  });
+
+  it('rejects a symbol that is not a ticker', async () => {
+    const result = (await executeTool(
+      'get_market_data',
+      { symbol: 'what should i buy' },
+      state,
+      REFERENCE,
+    )) as { available: boolean; reason: string };
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toBe('invalid-symbol');
+  });
+
+  it('reports an unknown tool rather than throwing', async () => {
+    expect(await executeTool('nope', {}, state, REFERENCE)).toHaveProperty('error');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('local specialist answers', () => {
+  const state = demo();
+  const ask = (question: string) => askLocally(question, state, REFERENCE);
+
+  it('answers credit questions with the user\'s real utilization', () => {
+    const reply = ask('how do I raise my credit score?');
+    expect(reply.agent.id).toBe('credit');
+    expect(reply.text).toMatch(/utilization/i);
+    // The specific figure, not a generic explanation.
+    expect(reply.text).toMatch(/Visa|Store card/);
+    expect(reply.text).toMatch(/under 30%/);
+    expect(reply.text).toMatch(/\$[\d,]+\.\d{2}/);
+  });
+
+  it('answers debt questions with real balances and interest', () => {
+    const reply = ask('snowball or avalanche?');
+    expect(reply.agent.id).toBe('debt');
+    expect(reply.text).toMatch(/Avalanche/);
+    expect(reply.text).toMatch(/interest alone/);
+    expect(reply.text).toMatch(/\$[\d,]+\.\d{2}/);
+  });
+
+  it('sizes the emergency fund from the user\'s essentials', () => {
+    const reply = ask('how big should my emergency fund be?');
+    expect(reply.agent.id).toBe('savings');
+    expect(reply.text).toMatch(/essential/i);
+    expect(reply.text).toMatch(/months of cover|months\*\*/);
+  });
+
+  it('quantifies subscriptions annually', () => {
+    const reply = ask('are my subscriptions worth it?');
+    expect(reply.agent.id).toBe('subscriptions');
+    expect(reply.text).toMatch(/\/year|\/yr/);
+    expect(reply.text).toMatch(/last 30 days/);
+  });
+
+  it('leads a budget answer with the fixed/discretionary split', () => {
+    const reply = ask('where did my money go this month?');
+    expect(reply.agent.id).toBe('budget');
+    expect(reply.text).toMatch(/fixed costs are/i);
+    expect(reply.text).toMatch(/of income/);
+  });
+
+  it('puts high-interest debt ahead of investing, with the real rate', () => {
+    const reply = ask('should I start investing?');
+    expect(reply.agent.id).toBe('investing');
+    expect(reply.text).toMatch(/guaranteed .*% return/);
+    expect(reply.text).toMatch(/29\.99%|24\.99%/);
+  });
+
+  it('still refuses a security recommendation on the local path', () => {
+    expect(ask('should I buy bitcoin?').text).toMatch(/not licensed/i);
+  });
+});
+
+describe('local hypothetical answers', () => {
+  const state = demo();
+  const ask = (question: string) => askLocally(question, state, REFERENCE);
+
+  it('answers a housing affordability hypothetical with figures and assumptions', () => {
+    const reply = ask('what if I earned $96,000 a year — what house could I afford?');
+    expect(reply.text).toMatch(/28% of gross/);
+    expect(reply.text).toMatch(/Assumptions/);
+    expect(reply.text).toMatch(/\$2,240\.00/);
+  });
+
+  it('answers an investment growth hypothetical', () => {
+    const reply = ask('what if I invested $400 a month at 7% for 25 years?');
+    expect(reply.text).toMatch(/Future value/);
+    expect(reply.text).toMatch(/assumption, not a promise/);
+  });
+
+  it('answers a retirement hypothetical using the 4% rule', () => {
+    const reply = ask('suppose I wanted $60,000 a year in retirement — how much do I need?');
+    expect(reply.text).toMatch(/4% rule/);
+    expect(reply.text).toMatch(/\$1,500,000\.00/);
+  });
+
+  it('answers a salary-change hypothetical against real spending', () => {
+    const reply = ask('what if I earned $120,000 a year?');
+    expect(reply.text).toMatch(/gross/);
+    expect(reply.text).toMatch(/savings rate/);
+  });
+
+  it('answers a payoff hypothetical, including one that never clears', () => {
+    const reply = ask('what if I paid $50 a month on a $10,000 balance at 24%?');
+    expect(reply.text).toMatch(/never clears/i);
+  });
+
+  it('never answers a hypothetical by refusing to look outside stored data', () => {
+    for (const question of [
+      'what if I made $200,000 a year?',
+      'if I had $50,000 saved, how long would it last?',
+      'could I afford $2,500 a month in rent?',
+      'what if I invested $1,000 a month at 6%?',
+    ]) {
+      const reply = ask(question);
+      expect(reply.text, question).not.toMatch(/only see|cannot see|no data|not in your/i);
+      expect(reply.text.length).toBeGreaterThan(80);
+    }
+  });
+});
+
+describe('roster integrity', () => {
+  it('gives every specialist keywords, tools and instructions', () => {
+    for (const agent of AGENT_LIST) {
+      expect(agent.name.length).toBeGreaterThan(0);
+      expect(agent.instructions.length).toBeGreaterThan(200);
+      expect(agent.tools.length).toBeGreaterThan(0);
+      if (agent.id !== 'triage') expect(agent.keywords.length).toBeGreaterThan(3);
+    }
+  });
+
+  it('produces a non-trivial local answer for every specialist', () => {
+    const state = demo();
+    const facts = buildFacts(state, REFERENCE);
+    for (const agent of AGENT_LIST) {
+      const answer = agent.localAnswer(facts, state, 'test');
+      expect(answer.length, agent.id).toBeGreaterThan(120);
+      expect(answer, agent.id).toMatch(/\$|%/);
+    }
+  });
+
+  it('keeps the triage agent reachable by id', () => {
+    expect(AGENTS.triage.id).toBe('triage');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('conversation memory', () => {
+  const state = demo();
+
+  function thread(...questions: string[]) {
+    let memory = emptyMemory();
+    const replies = [];
+    for (const question of questions) {
+      const reply = askLocally(question, state, REFERENCE, memory);
+      memory = reply.memory;
+      replies.push(reply);
+    }
+    return { replies, memory };
+  }
+
+  it('carries the specialist across a bare follow-up', () => {
+    const { replies } = thread('how do I raise my credit score?', 'why?');
+    expect(replies[0]?.agent.id).toBe('credit');
+    // "why?" alone routes nowhere; without stickiness it would land on triage.
+    expect(replies[1]?.agent.id).toBe('credit');
+  });
+
+  it('answers "why?" against the last recommendation instead of restarting', () => {
+    const { replies } = thread('how do I pay off my debt?', 'why?');
+    const second = replies[1]!.text;
+    // The conversational layer prefixes an acknowledgement, so "Because" is no
+    // longer the first word — but it must still be the first thing it *says*.
+    expect(second).toMatch(/Because of the arithmetic/);
+    expect(second).not.toBe(replies[0]!.text);
+    expect(second.length).toBeLessThan(replies[0]!.text.length);
+  });
+
+  it('resolves a named entity mentioned in a follow-up', () => {
+    const { replies } = thread('how is my credit?', 'what about the store card?');
+    expect(replies[1]?.text).toMatch(/Store card/);
+    expect(replies[1]?.text).toMatch(/utilization|Utilization/);
+  });
+
+  it('prices "how much would that save?" from the figure last discussed', () => {
+    const { replies } = thread('should I cut my subscriptions?', 'how much would that save?');
+    expect(replies[1]?.text).toMatch(/Annually|savings rate/i);
+    expect(replies[1]?.text).toMatch(/\$[\d,]+\.\d{2}/);
+  });
+
+  it('benchmarks "is that good?" against the standard ratios', () => {
+    const { replies } = thread('what is my savings rate?', 'is that good?');
+    expect(replies[1]?.text).toMatch(/benchmarks/i);
+    expect(replies[1]?.text).toMatch(/20%/);
+  });
+
+  it('records entities and terms as they come up', () => {
+    const { memory } = thread('how do I raise my credit score?');
+    expect(memory.introducedTerms).toContain('utilization');
+    expect(memory.lastAgent).toBe('credit');
+    expect(memory.lastQuestion).toBe('how do I raise my credit score?');
+  });
+
+  it('does not treat a fresh, self-contained question as a follow-up', () => {
+    let memory = emptyMemory();
+    memory = askLocally('how do I raise my credit score?', state, REFERENCE, memory).memory;
+    const resolution = resolveReferences('are my subscriptions worth it?', memory, state);
+    expect(resolution.isFollowUp).toBe(false);
+  });
+
+  it('lets a strongly-matching follow-up move the thread to another specialist', () => {
+    const { replies } = thread(
+      'how do I raise my credit score?',
+      'what about my emergency fund and savings goals?',
+    );
+    expect(replies[1]?.agent.id).toBe('savings');
+  });
+
+  it('expands a follow-up into a self-contained question', () => {
+    let memory = emptyMemory();
+    memory = askLocally('how is my credit utilization?', state, REFERENCE, memory).memory;
+    const resolution = resolveReferences('why?', memory, state);
+    expect(resolution.isFollowUp).toBe(true);
+    expect(resolution.question).toMatch(/following on from/);
+  });
+
+  it('keeps the transcript bounded', () => {
+    let memory = emptyMemory();
+    for (let i = 0; i < 12; i++) {
+      memory = askLocally(`question ${i} about spending`, state, REFERENCE, memory).memory;
+    }
+    expect(memory.turns.length).toBeLessThanOrEqual(12);
+    expect(memory.entities.length).toBeLessThanOrEqual(4);
+  });
+});
+
+describe('accountant register', () => {
+  it('tells the model to define a term once and then use it bare', () => {
+    const prompt = buildSystemPrompt(AGENTS.credit, 'FACTS', false, 'CONVERSATION STATE\n- Terms already explained: credit utilization');
+    expect(prompt).toContain('HOW TO TALK');
+    expect(prompt).toContain('define it once');
+    expect(prompt).toContain('Terms already explained');
+  });
+
+  it('surfaces established context and undefined terms to the model', () => {
+    const state = demo();
+    const facts = buildFacts(state, REFERENCE);
+    let memory = emptyMemory();
+    memory = rememberQuestion(memory, 'how is my credit?', state);
+    memory = rememberAnswer(
+      memory,
+      'Your credit utilization is 70%. Pay $560 to the store card before the statement closes.',
+      'credit',
+      state,
+      facts,
+    );
+
+    const rendered = formatMemory(memory);
+    expect(rendered).toContain('CONVERSATION STATE');
+    expect(rendered).toMatch(/Terms already explained:.*credit utilization/);
+    expect(rendered).toMatch(/Not yet explained/);
+    expect(rendered).toMatch(/last suggestion|last suggestion:/i);
+  });
+
+  it('defines a term on first use and drops the gloss afterwards', () => {
+    let memory = emptyMemory();
+    expect(withDefinition(memory, 'dti')).toMatch(/share of gross monthly income/);
+    memory = { ...memory, introducedTerms: ['dti'] };
+    expect(withDefinition(memory, 'dti')).toBe('debt-to-income ratio ');
+  });
+
+  it('finds glossary terms in prose', () => {
+    expect(termsIn('your debt-to-income ratio is high')).toContain('dti');
+    expect(termsIn('the avalanche method pays less interest')).toContain('avalanche');
+    expect(termsIn('nothing relevant here')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('numeric verification', () => {
+  const state = demo();
+  const facts = buildFacts(state, REFERENCE);
+
+  it('extracts money and percentage figures', () => {
+    const figures = extractFigures('You owe $3,400.00 at 24.99% and $920 more.');
+    expect(figures.filter((f) => f.kind === 'money').map((f) => f.value)).toEqual([340_000, 92_000]);
+    expect(figures.filter((f) => f.kind === 'percent').map((f) => f.value)).toEqual([24.99]);
+  });
+
+  it('verifies figures that came from the fact sheet', () => {
+    const report = verifyAnswer(
+      `Your debt is ${formatMoney(facts.debt.totalCents)} and your fixed costs are ${formatMoney(facts.cashflow.recurringCents)}.`,
+      facts,
+      [],
+    );
+    expect(report.ok).toBe(true);
+    expect(report.unverified).toHaveLength(0);
+  });
+
+  it('flags a figure that appears nowhere in the source data', () => {
+    const report = verifyAnswer('Your mortgage balance is $412,900.55.', facts, []);
+    expect(report.ok).toBe(false);
+    expect(report.unverified.map((f) => f.raw)).toContain('$412,900.55');
+  });
+
+  it('accepts a figure the model annualised from a monthly source', () => {
+    const monthly = facts.debt.monthlyInterestCents;
+    const report = verifyAnswer(`That is ${formatMoney(monthly * 12)} a year.`, facts, []);
+    expect(report.ok).toBe(true);
+  });
+
+  it('accepts figures returned by a tool this turn', async () => {
+    const toolResult = (await executeTool(
+      'calculate',
+      { operation: 'compound_growth', monthly_dollars: 400, annual_rate_percent: 7, years: 25 },
+      state,
+      REFERENCE,
+    )) as { future_value_dollars: number };
+
+    const withTool = verifyAnswer(
+      `You would have ${formatMoney(Math.round(toolResult.future_value_dollars * 100))}.`,
+      facts,
+      [toolResult],
+    );
+    expect(withTool.ok).toBe(true);
+
+    // The same claim without the tool result is exactly the hallucination case.
+    const withoutTool = verifyAnswer(
+      `You would have ${formatMoney(Math.round(toolResult.future_value_dollars * 100))}.`,
+      facts,
+      [],
+    );
+    expect(withoutTool.ok).toBe(false);
+  });
+
+  it('does not flag standard guideline percentages', () => {
+    const report = verifyAnswer('The guideline is 20% saving, 50% needs, 30% wants.', facts, []);
+    expect(report.ok).toBe(true);
+  });
+
+  it('builds a correction prompt naming the bad figures', () => {
+    const report = verifyAnswer('Your balance is $99,999.99.', facts, []);
+    const prompt = correctionPrompt(report);
+    expect(prompt).toContain('$99,999.99');
+    expect(prompt).toMatch(/do not have/i);
+  });
+
+  it('cautions rather than deleting when a figure survives correction', () => {
+    const report = verifyAnswer('Your balance is $99,999.99.', facts, []);
+    expect(cautionFor(report)).toMatch(/estimate/i);
+    expect(cautionFor(report)).toContain('$99,999.99');
+  });
+
+  it('passes an answer with no figures at all', () => {
+    expect(verifyAnswer('Pay the minimums on autopay first.', facts, []).ok).toBe(true);
+  });
+});
+
+describe('facts caching', () => {
+  it('returns the same object for the same state and date', () => {
+    const state = demo();
+    expect(buildFacts(state, REFERENCE)).toBe(buildFacts(state, REFERENCE));
+  });
+
+  it('recomputes when the state object changes', () => {
+    const state = demo();
+    const first = buildFacts(state, REFERENCE);
+    const edited = { ...state, goals: [] };
+    expect(buildFacts(edited, REFERENCE)).not.toBe(first);
+  });
+});
+
+describe('chat history', () => {
+  it('titles a thread from the first question', () => {
+    expect(titleFrom('How do I raise my credit score?')).toBe('How do I raise my credit score');
+    expect(titleFrom('  spaced   out  ')).toBe('spaced out');
+    const long = titleFrom('a'.repeat(80));
+    expect(long.length).toBeLessThanOrEqual(53);
+    expect(long.endsWith('…')).toBe(true);
+  });
+
+  it('falls back to a placeholder for an empty question', () => {
+    expect(titleFrom('   ')).toBe('New conversation');
+  });
+
+  it('starts a conversation with empty memory', () => {
+    const conversation = newConversation();
+    expect(conversation.messages).toHaveLength(0);
+    expect(conversation.memory.turns).toHaveLength(0);
+    expect(conversation.title).toBe('New conversation');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('income-minus-expenses scenarios', () => {
+  const state = demo();
+  const ask = (q: string) => askLocally(q, state, REFERENCE).text;
+
+  // The reported failure: every figure ignored, answered with the demo data.
+  it('answers the reported question with the user\'s own figures', () => {
+    const reply = ask(
+      'if i make 5k a month and have expenses totalling 1.5k a month how lomg would it take me to save 10k',
+    );
+    expect(reply).toMatch(/3 mo/);
+    expect(reply).toContain('$5,000.00');
+    expect(reply).toContain('$1,500.00');
+    expect(reply).toContain('$3,500.00');
+    expect(reply).toContain('$10,000.00');
+    // Must not quote the stored demo figures.
+    expect(reply).not.toContain('$6,800.00');
+    expect(reply).not.toContain('$2,852.03');
+  });
+
+  it('recognises present-tense conditionals', () => {
+    for (const phrasing of [
+      'if i make 5000 a month',
+      'if i earn 5000 a month',
+      'if i have 5000 a month',
+      'if i save 500 a month',
+      'if i spend 2000 a month',
+      'how long would it take me to save 10k',
+      'how many months to save $5,000',
+    ]) {
+      expect(isHypothetical(phrasing), phrasing).toBe(true);
+    }
+  });
+
+  it('classifies figures by the words around them, not by size', () => {
+    const scenario = readSavingsScenario(
+      'if i make 5k a month and have expenses totalling 1.5k a month how long to save 10k',
+    );
+    expect(scenario.monthlyIncomeCents).toBe(500_000);
+    expect(scenario.monthlyExpensesCents).toBe(150_000);
+    expect(scenario.targetCents).toBe(1_000_000);
+    expect(scenario.monthlyContributionCents).toBe(350_000);
+    expect(scenario.derivedFromSurplus).toBe(true);
+  });
+
+  it('prefers a stated monthly contribution over the derived surplus', () => {
+    const scenario = readSavingsScenario('i make 5k a month but can only save 800 a month toward 10k');
+    expect(scenario.monthlyContributionCents).toBe(80_000);
+    expect(scenario.derivedFromSurplus).toBe(false);
+  });
+
+  it('converts an annual salary to a monthly figure', () => {
+    const scenario = readSavingsScenario('if i earn $60,000 a year and spend 2k a month, how long to save 10k');
+    expect(scenario.monthlyIncomeCents).toBe(500_000);
+    expect(scenario.monthlyContributionCents).toBe(300_000);
+  });
+
+  it('says a target is unreachable when expenses swallow income', () => {
+    const reply = ask('if i make 2k a month and have expenses of 2k a month how long to save 10k');
+    expect(reply).toMatch(/not reachable/i);
+    expect(reply).not.toContain('$6,800.00');
+  });
+
+  it('shows the month-by-month build so the date can be checked', () => {
+    const reply = ask('if i make 5k a month and spend 1.5k a month how long to save 10k');
+    expect(reply).toContain('End of month 1: $3,500.00');
+    expect(reply).toContain('End of month 3: $10,500.00');
+  });
+
+  it('never answers a figure-bearing scenario with stored data', () => {
+    // A scenario shape the offline calculators do not cover.
+    const reply = ask('what if i inherited $250,000 and my brother took half of it, hypothetically');
+    expect(reply).not.toContain('$6,800.00');
+    expect(reply).not.toMatch(/keeping \*\*\d+%\*\* of your income/);
+    expect(reply).toMatch(/not the numbers you asked about|figures you gave me/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('borrowing scenarios', () => {
+  const state = demo();
+  const ask = (q: string) => askLocally(q, state, REFERENCE).text;
+
+  // The reported failure: a question about a loan the user is considering came
+  // back as a summary of the three debts they already have.
+  it("answers the reported question from the question's own figures", () => {
+    const reply = ask(
+      'i want to take out a 5k loan with 5% interest. How much would i be paying back in total?',
+    );
+    expect(reply).toContain('$5,000.00');
+    expect(reply).toContain('5.00%');
+    // The five-year line is the standard check figure for $5k at 5%.
+    expect(reply).toContain('$5,661.60');
+    expect(reply).toContain('$94.36');
+
+    // The answer must be *about the loan*. One labelled line relating it to the
+    // user's existing position is good advice and is allowed; what is not
+    // allowed is the reported failure, where the whole reply was the stored
+    // debt summary and the loan went unmentioned.
+    const [opening] = reply.split('Against your own position');
+    expect(opening).not.toContain('$22,720.00');
+    expect(reply).not.toMatch(/Store card|avalanche|Minimums total/i);
+  });
+
+  it('gives one exact total when the term is supplied', () => {
+    const reply = ask('if i borrow $5,000 at 5% over 3 years what do i pay back in total?');
+    expect(reply).toContain('$5,394.60');
+    expect(reply).toContain('$394.60');
+    expect(reply).toContain('$149.85');
+  });
+
+  it('asks for the rate rather than inventing one', () => {
+    const reply = ask('i want to borrow 20000 for a car, what will it cost me?');
+    expect(reply).toContain('$20,000.00');
+    expect(reply).toMatch(/not without the rate|APR and the term/i);
+    expect(reply).not.toContain('$22,720.00');
+  });
+
+  it('shows the term trade-off when no term is given', () => {
+    const reply = ask('what would a 10k loan at 8% cost me in total?');
+    expect(reply).toMatch(/1 year/);
+    expect(reply).toMatch(/5 years/);
+    expect(reply).toMatch(/more.{0,20}in interest/i);
+  });
+});
+
+describe('questions that carry their own figures', () => {
+  const state = demo();
+  const ask = (q: string) => askLocally(q, state, REFERENCE).text;
+
+  // The backstop behind the cue list: a figure absent from the user's data was
+  // supplied by the question, so the question is not about the ledger.
+  it('never answers a self-supplied figure with stored data', () => {
+    const reply = ask('how much would i pay back on 7500 at 11%?');
+    expect(reply).toContain('$7,500.00');
+    expect(reply).not.toContain('$22,720.00');
+    expect(reply).not.toContain('$6,800.00');
+  });
+
+  it('still treats a figure the user actually has as a question about their data', () => {
+    // $3,400 is the seeded Visa balance, so this is a ledger question and must
+    // not be hijacked into the scenario path.
+    const reply = ask('why is my $3,400 Visa balance costing so much?');
+    expect(reply).toMatch(/Visa/);
+    expect(reply).toContain('24.99%');
+    expect(reply).not.toMatch(/depends entirely on the term/i);
+  });
+
+  it('leaves ordinary questions about stored data alone', () => {
+    const reply = ask('where did my money go this month?');
+    expect(reply).toContain('$6,800.00');
+  });
+});
+
+describe('named accounts reach their detail rather than a summary', () => {
+  const state = demo();
+  const ask = (q: string) => askLocally(q, state, REFERENCE).text;
+
+  it('answers about the account the question names', () => {
+    const reply = ask('why is my Visa costing so much?');
+    expect(reply).toMatch(/Visa/);
+    expect(reply).toContain('24.99%');
+    // Not the generalist's position summary.
+    expect(reply).not.toMatch(/I have specialists for the detail/);
+  });
+
+  it('does not hijack advice questions that merely echo a goal name', () => {
+    // The regression this is scoped to avoid: "emergency fund" is also the name
+    // of a seeded goal, and this must stay advice rather than a balance readout.
+    const reply = ask('how big should my emergency fund be?');
+    expect(reply).toMatch(/essential|3 months|months of cover|range/i);
+  });
+});
+
+describe('scenario refinement across turns', () => {
+  const state = demo();
+  const OPENING =
+    'if i make 5k a month and have expenses totalling 1.5k a month how lomg would it take me to save 10k';
+
+  function thread(...questions: string[]) {
+    let memory = emptyMemory();
+    const replies: string[] = [];
+    for (const question of questions) {
+      const reply = askLocally(question, state, REFERENCE, memory);
+      memory = reply.memory;
+      replies.push(reply.text);
+    }
+    return { replies, memory };
+  }
+
+  it('remembers the scenario it was given', () => {
+    const { memory } = thread(OPENING);
+    expect(memory.lastScenario?.targetCents).toBe(1_000_000);
+    expect(memory.lastScenario?.monthlyIncomeCents).toBe(500_000);
+    expect(memory.lastScenario?.monthlyContributionCents).toBe(350_000);
+  });
+
+  it('records the questions it asked so it can receive the answers', () => {
+    const { memory } = thread(OPENING);
+    expect(memory.openQuestions.length).toBeGreaterThan(0);
+    expect(memory.openQuestions.join(' ')).toMatch(/gross/i);
+  });
+
+  // The reported failure: answering the advisor's own question restarted it.
+  it('applies both corrections and revises the estimate', () => {
+    const { replies } = thread(OPENING, 'this does not include ireegular cost and this i gross');
+    const second = replies[1]!;
+
+    expect(second).toMatch(/Revised/);
+    // $1,500 uplifted 15%, and gross converted to a take-home band.
+    expect(second).toContain('$1,725.00');
+    expect(second).toContain('$3,600.00');
+    expect(second).toContain('$4,000.00');
+    expect(second).toMatch(/5 mo/);
+    expect(second).toMatch(/6 mo/);
+    // Never the stored demo data.
+    expect(second).not.toContain('$6,800.00');
+    expect(second).not.toContain('$2,852.03');
+    expect(second).not.toMatch(/Here is where you stand/);
+  });
+
+  it('parses a typo\'d "ireegular"', () => {
+    expect(detectAssumptions('this does not include ireegular cost').expensesIncludeIrregular).toBe(false);
+    expect(detectAssumptions('yes it includes irregular costs').expensesIncludeIrregular).toBe(true);
+  });
+
+  it('reads gross and take-home statements', () => {
+    expect(detectAssumptions('that is gross').incomeIsGross).toBe(true);
+    expect(detectAssumptions("it's my take-home").incomeIsGross).toBe(false);
+    expect(detectAssumptions('after tax').incomeIsGross).toBe(false);
+    expect(detectAssumptions('nothing relevant').incomeIsGross).toBeUndefined();
+  });
+
+  it('collapses the range to one date once take-home is confirmed', () => {
+    const { replies } = thread(OPENING, 'that 5k is my take-home and it includes irregular costs');
+    const second = replies[1]!;
+    expect(second).toMatch(/Updated/);
+    expect(second).toContain('$3,500.00');
+    expect(second).toMatch(/3 mo/);
+    expect(second).not.toMatch(/Worst case/);
+  });
+
+  it('says a target is unreachable once corrections eat the surplus', () => {
+    const { replies } = thread(
+      'if i make 2k a month and have expenses of 1.6k a month how long to save 10k',
+      'that is gross and it excludes irregular costs',
+    );
+    expect(replies[1]).toMatch(/not reachable|nothing left over/i);
+    expect(replies[1]).not.toContain('$6,800.00');
+  });
+
+  it('treats a long leading-demonstrative reply as a follow-up', () => {
+    const { memory } = thread(OPENING);
+    const resolution = resolveReferences(
+      'this does not include ireegular cost and this i gross',
+      memory,
+      state,
+    );
+    expect(resolution.isFollowUp).toBe(true);
+  });
+
+  // Regression: a correction carrying a new figure merged only the assumption,
+  // so the old income stayed in place and the date came from a number the user
+  // had just replaced.
+  it('adopts a figure restated in a later turn', () => {
+    const { replies, memory } = thread(
+      OPENING,
+      'this does not include ireegular cost and this i gross',
+      'my take home is 3900',
+    );
+    expect(memory.lastScenario?.monthlyIncomeCents).toBe(390_000);
+    const third = replies[2]!;
+    expect(third).toContain('$3,900.00');
+    expect(third).toContain('$2,175.00'); // 3,900 − 1,725
+    expect(third).toMatch(/5 mo/);
+    expect(third).not.toContain('$5,000.00');
+  });
+
+  it('keeps the uplifted expense figure across turns', () => {
+    const { memory } = thread(OPENING, 'this is gross and excludes irregular costs', 'my take home is 4200');
+    expect(memory.lastScenario?.assumptions.expensesIncludeIrregular).toBe(false);
+    expect(memory.lastScenario?.assumptions.incomeIsGross).toBe(false);
+  });
+
+  it('keeps blank lines between sections so the answer is readable', () => {
+    const { replies } = thread(OPENING, 'this is gross');
+    expect(replies[1]).toContain('\n\n');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('conversational layer', () => {
+  const state = demo();
+
+  function thread(...questions: string[]) {
+    let memory = emptyMemory();
+    const replies: string[] = [];
+    for (const question of questions) {
+      const reply = askLocally(question, state, REFERENCE, memory);
+      memory = reply.memory;
+      replies.push(reply.text);
+    }
+    return { replies, memory };
+  }
+
+  it('does not repeat a paragraph it has already delivered', () => {
+    const { replies } = thread('how do I raise my credit score?', 'how do I raise my credit score?');
+    expect(replies[1]!.length).toBeLessThan(replies[0]!.length / 2);
+  });
+
+  it('keeps the figures when trimming repetition', () => {
+    const { replies } = thread('how do I raise my credit score?', 'how do I raise my credit score?');
+    // Prose goes; the numbers that answer the question stay.
+    expect(replies[1]).toMatch(/\$[\d,]+\.\d{2}|\d+%/);
+  });
+
+  it('acknowledges the turn it is continuing', () => {
+    const { replies } = thread('how do I raise my credit score?', 'what about the store card?');
+    expect(replies[1]).toMatch(/^(On|Staying with|For|Following on|Picking that up)/);
+  });
+
+  it('does not add an acknowledgement to a fresh question', () => {
+    const { replies } = thread('how do I raise my credit score?');
+    expect(replies[0]).not.toMatch(/^(On|Staying with|Following on)/);
+  });
+
+  it('never returns an empty reply when everything was already said', () => {
+    const { replies } = thread(
+      'are my subscriptions worth it?',
+      'are my subscriptions worth it?',
+      'are my subscriptions worth it?',
+    );
+    for (const reply of replies) expect(reply.trim().length).toBeGreaterThan(40);
+  });
+
+  it('leaves bullets and short lines alone', () => {
+    const trimmedOutput = trimRepetition(
+      '- $920.00 on the store card\n\nShort line.',
+      { ...emptyMemory(), turns: [{ role: 'advisor', text: '- $920.00 on the store card\n\nShort line.' }] },
+    );
+    expect(trimmedOutput.text).toContain('$920.00');
+    expect(trimmedOutput.removed).toBe(0);
+  });
+
+  it('varies the acknowledgement across turns rather than repeating one', () => {
+    const base = { ...emptyMemory(), entities: [{ kind: 'debt' as const, id: 'd', name: 'Visa' }] };
+    const first = acknowledgement({ ...base, turns: [{ role: 'advisor', text: 'a' }] }, true);
+    const second = acknowledgement(
+      { ...base, turns: [{ role: 'advisor', text: 'a' }, { role: 'advisor', text: 'b' }] },
+      true,
+    );
+    expect(first).not.toBe(second);
+  });
+
+  it('offers a next step only intermittently', () => {
+    const { replies } = thread(
+      'how do I raise my credit score?',
+      'what about the store card?',
+      'why?',
+      'is that good?',
+    );
+    const withNextStep = replies.filter((reply) => /\*[A-Z][^*]+\*$/m.test(reply.trim()));
+    // Present, but not on every single turn.
+    expect(withNextStep.length).toBeGreaterThan(0);
+    expect(withNextStep.length).toBeLessThan(replies.length);
+  });
+});
+
+describe('auth validation', () => {
+  it('accepts ordinary addresses and rejects obvious rubbish', () => {
+    expect(isValidEmail('alex@example.com')).toBe(true);
+    expect(isValidEmail('a.b+tag@sub.example.co.uk')).toBe(true);
+    expect(isValidEmail('not-an-email')).toBe(false);
+    expect(isValidEmail('missing@domain')).toBe(false);
+    expect(isValidEmail('')).toBe(false);
+  });
+
+  it('requires length over character classes', () => {
+    expect(checkPassword('short').ok).toBe(false);
+    expect(checkPassword('P@ss1').ok).toBe(false);
+    // A long passphrase with no symbols is fine; that is the point.
+    expect(checkPassword('correct horse battery staple').ok).toBe(true);
+    expect(checkPassword('correct horse battery staple').score).toBeGreaterThanOrEqual(3);
+  });
+
+  it('rejects passwords a cracking list already has', () => {
+    expect(checkPassword('password123456').ok).toBe(false);
+    expect(checkPassword('aaaaaaaaaaaaaa').ok).toBe(false);
+  });
+
+  it('normalises email for lookup', () => {
+    expect(normaliseEmail('  Alex@Example.COM ')).toBe('alex@example.com');
+  });
+});
