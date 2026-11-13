@@ -22,7 +22,7 @@ import type {
 } from '../types';
 import { clampDayToMonth, parseCycleKey } from '../lib/dates';
 import { newId } from '../lib/id';
-import { loadState, saveState } from '../lib/storage';
+import { emptyState, loadState, saveState } from '../lib/storage';
 import { seedState } from '../lib/seed';
 
 export type Action =
@@ -54,7 +54,8 @@ export type Action =
   | { type: 'settings/update'; patch: Partial<Settings> }
   | { type: 'state/replace'; state: AppState }
   | { type: 'state/reset' }
-  | { type: 'state/seed' };
+  | { type: 'state/seed' }
+  | { type: 'state/clear' };
 
 /** Derives the due date a posting override should carry for a given cycle. */
 function dueDateFor(state: AppState, expenseId: string, cycleKey: CycleKey): string {
@@ -238,6 +239,9 @@ export function reducer(state: AppState, action: Action): AppState {
     case 'state/seed':
       return seedState();
 
+    case 'state/clear':
+      return emptyState();
+
     default:
       return state;
   }
@@ -250,9 +254,22 @@ interface StoreValue {
 
 const StoreContext = createContext<StoreValue | null>(null);
 
-/** First run gets the demo data — an empty dashboard teaches nothing. */
+/**
+ * A new account starts at zero.
+ *
+ * It used to start on the demo data, on the reasoning that an empty dashboard
+ * teaches nothing. That is true of a dashboard and false of a ledger: someone
+ * who signs up and finds a stranger's $6,000 salary and $1,500 rent cannot tell
+ * which figures are theirs, and the first thing they have to do is delete
+ * sixteen entries they did not make. Worse, the one number the app exists to
+ * give them is wrong on sight.
+ *
+ * So the sample data is now something you ask for. The dashboard offers it on
+ * first run and Settings keeps it, which costs one tap and buys an app that is
+ * never wrong about whose money it is holding.
+ */
 function initialState(): AppState {
-  return loadState() ?? seedState();
+  return loadState() ?? emptyState();
 }
 
 export function StoreProvider({ children }: { children: ReactNode }) {

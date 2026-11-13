@@ -44,6 +44,10 @@ export function Dashboard({ reference, onEditExpense }: { reference: string; onE
   );
   const confirmations = useMemo(() => pendingConfirmations(state, reference), [state, reference]);
 
+  // A ledger with no income and no expenses is a new account, whatever period
+  // is selected — so the first-run guidance follows the account, not the month.
+  const isEmptyAccount = state.income.length === 0 && state.expenses.length === 0;
+
   return (
     <div className="stack">
       <PeriodControls
@@ -58,7 +62,13 @@ export function Dashboard({ reference, onEditExpense }: { reference: string; onE
         onCustomEnd={setCustomEnd}
       />
 
-      <BalanceHeader snapshot={snapshot} bufferMode={state.settings.bufferMode} />
+      <BalanceHeader
+        snapshot={snapshot}
+        bufferMode={state.settings.bufferMode}
+        empty={isEmptyAccount}
+      />
+
+      {isEmptyAccount && <FirstRun onLoadSample={() => dispatch({ type: 'state/seed' })} />}
 
       {confirmations.length > 0 && (
         <ConfirmationPrompts
@@ -320,7 +330,15 @@ function PeriodControls({
 
 // ---------------------------------------------------------------------------
 
-function BalanceHeader({ snapshot, bufferMode }: { snapshot: Snapshot; bufferMode: boolean }) {
+function BalanceHeader({
+  snapshot,
+  bufferMode,
+  empty,
+}: {
+  snapshot: Snapshot;
+  bufferMode: boolean;
+  empty: boolean;
+}) {
   const negative = snapshot.remainingBalanceCents < 0;
   const safeNegative = snapshot.safeToSpendCents < 0;
   // Counting the figure to its new value makes an edit visibly land on the
@@ -344,6 +362,15 @@ function BalanceHeader({ snapshot, bufferMode }: { snapshot: Snapshot; bufferMod
         </div>
 
         <div className="balance__note">
+          {/* On an account with nothing in it, "every bill has been paid" and
+              the advice about anchoring a starting balance are both true and
+              both absurd: there are no bills and no month to anchor. Say the
+              one thing that is useful instead, and let the card below explain
+              what to do about it. */}
+          {empty ? (
+            <>Nothing entered yet, so there is nothing to spend or hold back.</>
+          ) : (
+            <>
           {bufferMode && snapshot.nextPayday ? (
             <>
               Buffer mode — holding back only what is due before your next payday on{' '}
@@ -362,6 +389,8 @@ function BalanceHeader({ snapshot, bufferMode }: { snapshot: Snapshot; bufferMod
               {' '}
               Set your account balance in Settings to make this exact — without it, safe-to-spend assumes the month
               opened at zero.
+            </>
+          )}
             </>
           )}
         </div>
@@ -494,6 +523,34 @@ function ConfirmationPrompts({
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * What a brand-new account sees.
+ *
+ * The balance above it reads $0.00, which is correct and uninformative, so this
+ * says where the figure comes from and offers the sample month to anyone who
+ * would rather look around before typing. Both paths are one tap, and neither
+ * one leaves someone unsure whether the numbers on screen are their own.
+ */
+function FirstRun({ onLoadSample }: { onLoadSample: () => void }) {
+  return (
+    <Card title="Start with what you earn">
+      <p className="small" style={{ margin: '0 0 10px' }}>
+        Add your income on the Money tab, then the bills you already owe. The balance above
+        turns into what is actually safe to spend once everything committed is set aside.
+      </p>
+      <p className="tiny faint" style={{ margin: '0 0 12px' }}>
+        Nothing you enter leaves this device.
+      </p>
+      <button type="button" className="btn btn--sm" onClick={onLoadSample}>
+        Fill it with a sample month instead
+      </button>
+      <div className="tiny faint" style={{ marginTop: 8 }}>
+        Sample data is made up, and Settings has a button to clear it.
+      </div>
+    </Card>
+  );
+}
 
 export function LedgerRow({
   line,

@@ -298,6 +298,20 @@ export function SettingsView({
           >
             Reset to demo data
           </button>
+          {/* The way back from the sample month. Without this, someone who
+              tapped "sample" on the dashboard to look around has no way to
+              return to an empty ledger except deleting entries one by one. */}
+          <button
+            type="button"
+            className="btn btn--danger btn--sm"
+            onClick={() => {
+              if (confirm('Delete everything and start from an empty app? This cannot be undone.')) {
+                dispatch({ type: 'state/clear' });
+              }
+            }}
+          >
+            Clear everything
+          </button>
         </div>
         {importError && (
           <div className="alert alert--danger" style={{ marginTop: 10 }}>
