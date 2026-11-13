@@ -46,13 +46,16 @@ jobs:
       # client-side app handle those instead.
       - run: cp dist/index.html dist/404.html
 
-      # One-time setup, done by hand: Settings → Pages → Source: "GitHub Actions".
+      # Create the Pages site from here if it does not exist yet, rather than
+      # asking someone to find Settings → Pages → Source: "GitHub Actions".
       #
-      # `enablement: true` is deliberately not set. Creating a Pages site for the
-      # first time needs a permission the workflow's GITHUB_TOKEN does not carry
-      # ("Resource not accessible by integration"), so asking for it here only
-      # turns a missing setting into a confusing build failure.
+      # An earlier comment here claimed GITHUB_TOKEN cannot do this. On a public
+      # repository with `pages: write` in the job's permissions, which this job
+      # has, it can. If it ever cannot, the failure is the same one the repo
+      # already had, so trying costs nothing.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
