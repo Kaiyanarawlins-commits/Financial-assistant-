@@ -7,6 +7,7 @@ import {
   rememberSessionToken,
   type Session,
 } from './lib/auth';
+import { demoRequested, markDemoActive, openDemoSession } from './lib/demo';
 import { setStorageNamespace } from './lib/storage';
 import { setChatNamespace } from './lib/chatHistory';
 import { clearMarketCache } from './lib/business/market';
@@ -72,6 +73,22 @@ export default function App() {
   useEffect(() => {
     const token = readSessionToken();
     if (!token) {
+      // `?demo` opens the sample account instead of the sign-in screen. Nobody
+      // reaches this link by accident, and a saved session always wins, so a
+      // real user who once followed it cannot be dropped into the demo later.
+      if (demoRequested()) {
+        let cancelled = false;
+        void openDemoSession()
+          .then((demo) => {
+            if (!cancelled && demo) adopt(demo);
+          })
+          .finally(() => {
+            if (!cancelled) setChecking(false);
+          });
+        return () => {
+          cancelled = true;
+        };
+      }
       setChecking(false);
       return;
     }
@@ -80,6 +97,9 @@ export default function App() {
       .restore(token)
       .then((restored) => {
         if (cancelled) return;
+        // A restored demo session must still count as the demo, or a reload
+        // would leave the sample ledger loaded with nothing marking it as such.
+        markDemoActive(restored);
         adopt(restored);
       })
       .catch(() => undefined)

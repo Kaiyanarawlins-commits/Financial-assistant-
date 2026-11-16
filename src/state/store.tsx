@@ -24,6 +24,7 @@ import { clampDayToMonth, parseCycleKey } from '../lib/dates';
 import { newId } from '../lib/id';
 import { emptyState, loadState, saveState } from '../lib/storage';
 import { seedState } from '../lib/seed';
+import { demoActive } from '../lib/demo';
 
 export type Action =
   | { type: 'income/add'; entry: Omit<IncomeEntry, 'id'> }
@@ -269,7 +270,11 @@ const StoreContext = createContext<StoreValue | null>(null);
  * never wrong about whose money it is holding.
  */
 function initialState(): AppState {
-  return loadState() ?? emptyState();
+  const stored = loadState();
+  if (stored) return stored;
+  // The one account that still starts full: the demo, whose entire purpose is
+  // to show the app working. A real account reaching this line gets zero.
+  return demoActive() ? seedState() : emptyState();
 }
 
 export function StoreProvider({ children }: { children: ReactNode }) {
