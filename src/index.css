@@ -162,7 +162,13 @@ p { margin: 0; }
 .topbar {
   max-width: var(--max-width);
   margin: 0 auto;
-  padding: 18px 16px 0;
+  /*
+    Installed on an iPhone, the status bar is translucent and the page starts
+    at the very top of the screen, so without this inset the logo sits under
+    the clock and the Dynamic Island. In a browser tab the inset is 0 and the
+    padding is unchanged, which is why it is added rather than substituted.
+  */
+  padding: calc(18px + env(safe-area-inset-top, 0px)) 16px 0;
   display: flex;
   align-items: center;
   justify-content: space-between;

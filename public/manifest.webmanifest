@@ -1,5 +1,5 @@
 {
-  "name": "CashCompass — Income & Spending Navigator",
+  "name": "CashCompass",
   "short_name": "CashCompass",
   "description": "Log your income, subtract your expenses, and see in real time how much you have left.",
   "start_url": "./",

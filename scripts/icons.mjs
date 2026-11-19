@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ico } from './ico.mjs';
 
 /**
  * Renders the app icons from one SVG source.
@@ -38,17 +39,37 @@ const targets = [
   { file: 'icon-192.png', size: 192, inset: 0 },
   { file: 'icon-512.png', size: 512, inset: 0 },
   { file: 'icon-maskable-512.png', size: 512, inset: 0.22 },
+  // iOS rounds the corners itself and composites onto black if the image has
+  // any transparency, so this one is deliberately full-bleed and opaque.
   { file: 'apple-touch-icon.png', size: 180, inset: 0.06 },
+  { file: 'favicon-32.png', size: 32, inset: 0 },
+  { file: 'favicon-16.png', size: 16, inset: 0 },
 ];
 
-const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
+// Playwright's bundled browser lives at a versioned path that differs between
+// machines, so take it from the environment when the default is not there
+// rather than failing with a path nobody can guess.
+const executablePath = process.env.CHROME_PATH ?? '/opt/pw-browsers/chromium';
+
+const browser = await chromium.launch({ executablePath });
+const png = {};
 for (const { file, size, inset } of targets) {
   const page = await browser.newPage({ viewport: { width: size, height: size }, deviceScaleFactor: 1 });
   await page.setContent(
     `<style>html,body{margin:0;padding:0;background:${NAVY}}svg{display:block;width:${size}px;height:${size}px}</style>${svg(inset)}`,
   );
-  writeFileSync(join(out, file), await page.screenshot({ omitBackground: false }));
+  png[file] = await page.screenshot({ omitBackground: false });
+  writeFileSync(join(out, file), png[file]);
   await page.close();
   console.log(`public/${file}  ${size}x${size}`);
 }
 await browser.close();
+
+writeFileSync(
+  join(out, 'favicon.ico'),
+  ico([
+    { side: 16, data: png['favicon-16.png'] },
+    { side: 32, data: png['favicon-32.png'] },
+  ]),
+);
+console.log('public/favicon.ico  16x16 + 32x32');
