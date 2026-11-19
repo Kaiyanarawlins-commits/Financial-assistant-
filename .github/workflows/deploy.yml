@@ -1,0 +1,89 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+      - claude/cashcompass-finance-app-qxy4ae
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it — a half-published site
+# is worse than a slightly stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Gate the deploy on the engine tests. The balance maths is the product;
+      # shipping it broken to a phone someone budgets on is the failure mode
+      # worth spending 30 seconds of CI on.
+      - run: npm test
+
+      # Where the site is served from decides the asset base, and the answer is
+      # not always "/<repo>/". Three cases, all of which this project may hit:
+      #
+      #   kaiyanarawlins-commits.github.io/CashCompass/  -> /CashCompass/
+      #   cashcompass.github.io            (repo *.github.io) -> /
+      #   cashcompass.app                  (public/CNAME)     -> /
+      #
+      # Getting this wrong does not fail the build. It publishes a site that
+      # serves a white page and 404s every asset, which is a worse way to find
+      # out, so the base is computed rather than assumed.
+      - id: base
+        run: |
+          repo='${{ github.event.repository.name }}'
+          base="/$repo/"
+          case "$repo" in *.github.io) base="/" ;; esac
+          if [ -f public/CNAME ]; then base="/"; fi
+          echo "path=$base" >> "$GITHUB_OUTPUT"
+          echo "Serving from $base"
+
+      - run: npm run build
+        env:
+          VITE_BASE: ${{ steps.base.outputs.path }}
+
+      # Single-page app: Pages has no rewrite rules, so a deep link or a reload
+      # on any path would 404. Serving the same document as 404.html makes the
+      # client-side app handle those instead.
+      - run: cp dist/index.html dist/404.html
+
+      # One-time setup, done by hand: Settings → Pages → Source: "GitHub Actions".
+      #
+      # `enablement: true` does not work here, and this is not a guess: run 15
+      # on 2026-11-13 tried it on this public repo with `pages: write` already
+      # granted below, and the API answered "Create Pages site failed. Error:
+      # Resource not accessible by integration". GITHUB_TOKEN can publish to a
+      # Pages site that exists; it cannot bring one into being. Asking for it
+      # only replaces a clear "enable Pages" error with a murkier one.
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
